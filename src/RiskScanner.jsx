@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import TargetPlanner from './TargetPlanner.jsx';
 
 const API = 'http://localhost:8000';
 
@@ -222,9 +223,9 @@ function SettingsTab({ settings, onSave }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '16px 18px', background: '#111', borderRadius: 8, border: '1px solid #1e1e1e' }}>
             <SettingRow
               label="Account Balance"
-              hint="MT5 shows ₦0 for this account — enter your actual balance here."
+              hint="MT5 shows NGN 0 for this account - enter your actual balance here."
             >
-              <SettingsInput prefix="₦" value={local.balance} onChange={set('balance')} min={0} step={1000} />
+              <SettingsInput prefix="NGN" value={local.balance} onChange={set('balance')} min={0} step={1000} />
             </SettingRow>
           </div>
         </div>
@@ -241,7 +242,7 @@ function SettingsTab({ settings, onSave }) {
             >
               <SettingsInput value={local.dailyLossPct} onChange={set('dailyLossPct')} suffix="%" min={0.1} max={20} step={0.5} />
               <span style={{ fontSize: 11, color: '#f59e0b', marginTop: 2 }}>
-                = ₦{(Number(local.balance) * Number(local.dailyLossPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} at current balance
+                = NGN {(Number(local.balance) * Number(local.dailyLossPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} at current balance
               </span>
             </SettingRow>
 
@@ -251,7 +252,7 @@ function SettingsTab({ settings, onSave }) {
             >
               <SettingsInput value={local.riskPct} onChange={set('riskPct')} suffix="%" min={0.1} max={10} step={0.1} />
               <span style={{ fontSize: 11, color: '#38bdf8', marginTop: 2 }}>
-                = ₦{(Number(local.balance) * Number(local.riskPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} per trade
+                = NGN {(Number(local.balance) * Number(local.riskPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} per trade
               </span>
             </SettingRow>
           </div>
@@ -376,7 +377,7 @@ export default function RiskScanner() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div>
             <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#f0f0f0' }}>Pair Risk Scanner</h1>
-            <p style={{ margin: '4px 0 0', fontSize: 12, color: '#555' }}>Capital preservation — Gate-and-Rank scoring</p>
+            <p style={{ margin: '4px 0 0', fontSize: 12, color: '#555' }}>Capital preservation - Gate-and-Rank scoring</p>
           </div>
           <div style={{ textAlign: 'right' }}>
             <button onClick={() => fetchData()} disabled={loading} style={{
@@ -385,7 +386,7 @@ export default function RiskScanner() {
               padding: '6px 16px', cursor: loading ? 'not-allowed' : 'pointer',
               fontSize: 12, fontWeight: 600,
             }}>
-              {loading ? 'Scanning…' : '↻ Refresh'}
+              {loading ? 'Scanning...' : 'Refresh'}
             </button>
             {lastRefresh && <div style={{ fontSize: 11, color: '#444', marginTop: 4 }}>Last scan: {lastRefresh}</div>}
           </div>
@@ -394,12 +395,17 @@ export default function RiskScanner() {
         {/* Tab bar */}
         <div style={{ display: 'flex', borderBottom: '1px solid #1e1e1e', marginBottom: 20, gap: 4 }}>
           <button style={TAB_STYLE(tab === 'scanner')} onClick={() => setTab('scanner')}>Scanner</button>
-          <button style={TAB_STYLE(tab === 'settings')} onClick={() => setTab('settings')}>⚙ Settings</button>
+          <button style={TAB_STYLE(tab === 'target')} onClick={() => setTab('target')}>Target</button>
+          <button style={TAB_STYLE(tab === 'settings')} onClick={() => setTab('settings')}>Settings</button>
         </div>
 
         {/* Settings tab */}
         {tab === 'settings' && (
           <SettingsTab settings={settings} onSave={handleSaveSettings} />
+        )}
+
+        {tab === 'target' && (
+          <TargetPlanner settings={settings} />
         )}
 
         {/* Scanner tab */}
@@ -414,15 +420,15 @@ export default function RiskScanner() {
               }}>
                 <div>
                   <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance</div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>₦{data.balance_ngn?.toLocaleString()}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>NGN {data.balance_ngn?.toLocaleString()}</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Daily Limit</div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: '#f59e0b' }}>₦{data.daily_limit_ngn?.toLocaleString()}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: '#f59e0b' }}>NGN {data.daily_limit_ngn?.toLocaleString()}</div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Risk / Trade</div>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: '#38bdf8' }}>₦{data.risk_per_trade?.toLocaleString()}</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: '#38bdf8' }}>NGN {data.risk_per_trade?.toLocaleString()}</div>
                 </div>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: 16 }}>
                   {[
@@ -451,7 +457,7 @@ export default function RiskScanner() {
                 <span>Score</span>
                 <input type="number" min={0} max={100} value={minScore} onChange={e => setMinScore(e.target.value)}
                   style={{ width: 44, background: '#111', border: '1px solid #333', color: '#e0e0e0', borderRadius: 4, padding: '3px 6px', fontSize: 12 }} />
-                <span style={{ color: '#444' }}>–</span>
+                <span style={{ color: '#444' }}>-</span>
                 <input type="number" min={0} max={100} value={maxScore} onChange={e => setMaxScore(e.target.value)}
                   style={{ width: 44, background: '#111', border: '1px solid #333', color: '#e0e0e0', borderRadius: 4, padding: '3px 6px', fontSize: 12 }} />
               </div>
@@ -485,7 +491,7 @@ export default function RiskScanner() {
             {filtered.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontSize: 11, color: '#444', marginBottom: 2 }}>
-                  {filtered.length} pair{filtered.length !== 1 ? 's' : ''} shown — click a card to expand details
+                  {filtered.length} pair{filtered.length !== 1 ? 's' : ''} shown - click a card to expand details
                 </div>
                 {filtered.map(pair => <PairCard key={pair.symbol} pair={pair} />)}
               </div>
