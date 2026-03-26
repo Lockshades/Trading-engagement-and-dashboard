@@ -63,6 +63,7 @@ SAMPLE_STATS = {
     "avg_trades_per_day": 3.0,
     "marginal_cutoff": 4,
     "max_consecutive_losses": 2,
+    "avg_volume": 0.01,
     "total_trading_days": 20,
     "low_data_warning": False,
     "data_quality": "MEDIUM",
@@ -156,7 +157,7 @@ def test_override_win_rate_applied():
     assert override_milestones[0]["est_days_mid"] < base_milestones[0]["est_days_mid"]
 
 
-def test_milestones_stop_when_next_tier_would_not_advance_capital():
+def test_milestones_use_checkpoint_progression_for_large_targets():
     pair_info = {
         "symbol": "US500m",
         "volume_min": 0.09,
@@ -175,8 +176,29 @@ def test_milestones_stop_when_next_tier_would_not_advance_capital():
         0.0001,
         0.02,
     )
-    assert len(milestones) == 1
-    assert milestones[0]["capital_end"] > milestones[0]["capital_start"]
+    assert len(milestones) >= 4
+    assert milestones[-1]["capital_end"] == 500_000
+    assert all(milestone["capital_end"] > milestone["capital_start"] for milestone in milestones)
+
+
+def test_milestones_flag_review_when_expectancy_is_not_positive():
+    negative_stats = {
+        **SAMPLE_STATS,
+        "win_rate": 0.35,
+        "avg_win_ngn": 1000.0,
+        "avg_loss_ngn": 2200.0,
+    }
+    milestones = compute_milestones(
+        100_000,
+        200_000,
+        negative_stats,
+        SAMPLE_PAIR_INFO,
+        {},
+        0.01,
+        0.02,
+    )
+    assert milestones[0]["estimation_mode"] == "review"
+    assert milestones[0]["est_days_mid"] is None
 
 
 def _make_deals(profits):

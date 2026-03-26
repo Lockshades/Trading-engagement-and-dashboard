@@ -249,14 +249,34 @@ function getMt5SnapshotSource(accountSnapshot) {
   return null;
 }
 
-function formatDays(low, mid, high) {
+function hasFiniteEstimate(low, mid, high) {
+  return [low, mid, high].every((value) => Number.isFinite(value));
+}
+
+function formatDays(low, mid, high, mode) {
+  if (!hasFiniteEstimate(low, mid, high)) {
+    return mode === 'review' ? 'Review edge' : 'Estimate pending';
+  }
+
   if (low === high) {
     return `${mid} day${mid === 1 ? '' : 's'}`;
   }
   return `${low}-${high} days (mid ${mid})`;
 }
 
-function ConfidenceBand({ low, mid, high }) {
+function ConfidenceBand({ low, mid, high, mode }) {
+  if (!hasFiniteEstimate(low, mid, high)) {
+    return (
+      <div style={{ marginTop: 8 }}>
+        <div style={{ fontSize: 10, color: '#f59e0b', marginBottom: 4 }}>
+          {mode === 'review'
+            ? 'Selected pair history does not show a positive daily edge yet. Review the analysis tab or use overrides.'
+            : 'Time estimate is not available yet.'}
+        </div>
+      </div>
+    );
+  }
+
   const max = Math.max(high, 1);
   const left = (low / max) * 100;
   const width = ((high - low) / max) * 100;
@@ -292,6 +312,12 @@ function ConfidenceBand({ low, mid, high }) {
 function MilestoneCard({ milestone, index }) {
   const [expanded, setExpanded] = useState(false);
   const qualityColour = QUALITY_COLOURS[milestone.data_quality] || '#888';
+  const estimateLabel = formatDays(
+    milestone.est_days_low,
+    milestone.est_days_mid,
+    milestone.est_days_high,
+    milestone.estimation_mode
+  );
 
   return (
     <div
@@ -333,7 +359,7 @@ function MilestoneCard({ milestone, index }) {
           </span>
         </div>
         <span style={{ fontSize: 12, color: '#38bdf8' }}>
-          {formatDays(milestone.est_days_low, milestone.est_days_mid, milestone.est_days_high)}
+          {estimateLabel}
         </span>
       </div>
 
@@ -341,6 +367,7 @@ function MilestoneCard({ milestone, index }) {
         low={milestone.est_days_low}
         mid={milestone.est_days_mid}
         high={milestone.est_days_high}
+        mode={milestone.estimation_mode}
       />
 
       {expanded && (
@@ -368,6 +395,11 @@ function MilestoneCard({ milestone, index }) {
           {milestone.overrides_applied?.length > 0 && (
             <div style={{ gridColumn: '1 / -1', fontSize: 11, color: '#f59e0b' }}>
               Manual overrides: {milestone.overrides_applied.join(', ')}
+            </div>
+          )}
+          {milestone.estimation_mode === 'review' && (
+            <div style={{ gridColumn: '1 / -1', fontSize: 11, color: '#f59e0b' }}>
+              Timing estimate needs review because the selected pair history does not currently model a positive daily edge.
             </div>
           )}
         </div>

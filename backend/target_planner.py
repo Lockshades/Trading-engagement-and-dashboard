@@ -21,6 +21,7 @@ DEFAULTS = {
     "avg_trades_per_day": 3.0,
     "marginal_cutoff": 4,
     "max_consecutive_losses": 2,
+    "avg_volume": 0.01,
 }
 
 
@@ -87,6 +88,8 @@ def analyze_history(deals: list) -> dict:
         if days
         else DEFAULTS["avg_trades_per_day"]
     )
+    volumes = [float(deal.get("volume", 0.0) or 0.0) for deal in deals if float(deal.get("volume", 0.0) or 0.0) > 0]
+    avg_volume = (sum(volumes) / len(volumes)) if volumes else DEFAULTS["avg_volume"]
 
     total_days = len(days)
     data_quality = (
@@ -105,11 +108,56 @@ def analyze_history(deals: list) -> dict:
         "avg_trades_per_day": avg_trades,
         "marginal_cutoff": marginal_cutoff,
         "max_consecutive_losses": max_consec,
+        "avg_volume": avg_volume,
         "total_trading_days": total_days,
         "low_data_warning": total_days < 15,
         "data_quality": data_quality,
         "no_history": False,
     }
+
+
+def _recommended_lot(capital: float, pair_info: dict, risk_pct: float) -> float:
+    vol_min = max(pair_info["volume_min"], 0.01)
+    vol_step = max(pair_info["volume_step"], 0.01)
+    vol_max = max(pair_info.get("volume_max", vol_min), vol_min)
+    atr = max(pair_info["atr"], 0.0)
+    tick_val = max(pair_info["trade_tick_value"], 0.0)
+    point = max(pair_info["point"], 1e-10)
+    loss_per_lot = (atr / point) * tick_val if point > 0 else 0.0
+
+    if loss_per_lot <= 0 or risk_pct <= 0:
+        return round(vol_min, 8)
+
+    raw_lot = (capital * risk_pct) / loss_per_lot
+    min_units = max(int(math.ceil((vol_min - 1e-12) / vol_step)), 1)
+    max_units = max(int(math.floor((vol_max + 1e-12) / vol_step)), min_units)
+    lot_units = max(int(math.floor((raw_lot + 1e-12) / vol_step)), min_units)
+    lot_units = min(lot_units, max_units)
+    return round(lot_units * vol_step, 8)
+
+
+def _capital_checkpoints(start_ngn: float, target_ngn: float) -> list[float]:
+    if target_ngn <= start_ngn:
+        return []
+
+    ratio = max(target_ngn / max(start_ngn, 1.0), 1.01)
+    desired_segments = min(max(math.ceil(math.log(ratio, 1.35)), 4), 8)
+    growth_factor = ratio ** (1 / desired_segments)
+
+    checkpoints = []
+    previous = start_ngn
+    for step in range(1, desired_segments + 1):
+        checkpoint = target_ngn if step == desired_segments else round(start_ngn * (growth_factor ** step), 2)
+        checkpoint = max(checkpoint, round(previous + 1.0, 2))
+        checkpoint = min(checkpoint, target_ngn)
+        if checkpoint > previous:
+            checkpoints.append(checkpoint)
+            previous = checkpoint
+
+    if checkpoints and checkpoints[-1] != target_ngn:
+        checkpoints[-1] = target_ngn
+
+    return checkpoints
 
 
 def compute_milestones(
@@ -122,8 +170,8 @@ def compute_milestones(
     daily_loss_pct: float = 0.02,
 ) -> list:
     """
-    Generate milestone list from start_ngn to target_ngn.
-    Each milestone represents one lot-tier increment.
+    Generate milestone checkpoints from start_ngn to target_ngn.
+    Milestones are capital progress bands with lot sizing recomputed at each step.
     """
     if start_ngn >= target_ngn:
         return []
@@ -135,11 +183,9 @@ def compute_milestones(
     std_loss = stats["std_loss"]
     cutoff = max(int(stats["marginal_cutoff"]), 1)
     avg_trades = stats["avg_trades_per_day"]
+    avg_volume = max(float(stats.get("avg_volume", DEFAULTS["avg_volume"]) or DEFAULTS["avg_volume"]), 1e-6)
     low_data = stats["low_data_warning"]
 
-    vol_min = max(pair_info["volume_min"], 0.01)
-    vol_step = max(pair_info["volume_step"], 0.01)
-    vol_max = max(pair_info.get("volume_max", vol_min), vol_min)
     atr = max(pair_info["atr"], 0.0)
     tick_val = max(pair_info["trade_tick_value"], 0.0)
     point = max(pair_info["point"], 1e-10)
@@ -148,24 +194,8 @@ def compute_milestones(
     milestones = []
     capital = start_ngn
 
-    for _ in range(20):
-        if capital >= target_ngn:
-            break
-
-        loss_per_lot = (atr / point) * tick_val if point > 0 else 0.0
-        raw_lot = (capital * risk_pct) / loss_per_lot if loss_per_lot > 0 else vol_min
-        min_units = max(int(math.ceil((vol_min - 1e-12) / vol_step)), 1)
-        max_units = max(int(math.floor((vol_max + 1e-12) / vol_step)), min_units)
-        lot_units = max(int(math.floor((raw_lot + 1e-12) / vol_step)), min_units)
-        lot_units = min(lot_units, max_units)
-        rec_lot = round(lot_units * vol_step, 8)
-
-        at_max_lot = lot_units >= max_units
-        next_lot = rec_lot if at_max_lot else round((lot_units + 1) * vol_step, 8)
-        capital_for_next = (next_lot * loss_per_lot) / risk_pct if risk_pct > 0 else target_ngn
-        milestone_end = target_ngn if at_max_lot else min(capital_for_next, target_ngn)
-        if milestone_end <= capital:
-            break
+    for milestone_end in _capital_checkpoints(start_ngn, target_ngn):
+        rec_lot = _recommended_lot(capital, pair_info, risk_pct)
 
         daily_target_ngn = capital * daily_loss_pct * 0.5
         pip_val_at_lot = pip_val_per_lot * rec_lot
@@ -176,12 +206,10 @@ def compute_milestones(
         max_trades = cutoff
 
         gain_needed = milestone_end - capital
-        scale = rec_lot / vol_min
+        scale = rec_lot / avg_volume
         eff_win = avg_win * scale
         eff_loss = avg_loss * scale
         exp_daily = win_rate * eff_win - (1 - win_rate) * eff_loss
-
-        est_mid = math.ceil(gain_needed / exp_daily) if exp_daily > 0 else 999
 
         opt_daily = (
             win_rate * (eff_win + 0.5 * std_win * scale)
@@ -192,15 +220,24 @@ def compute_milestones(
             - (1 - win_rate) * (eff_loss + 0.5 * std_loss * scale)
         )
 
-        est_low = math.ceil(gain_needed / opt_daily) if opt_daily > 0 else 999
-        est_high = math.ceil(gain_needed / pess_daily) if pess_daily > 0 else 999
+        if exp_daily > 0 and opt_daily > 0 and pess_daily > 0:
+            est_mid = math.ceil(gain_needed / exp_daily)
+            est_low = math.ceil(gain_needed / opt_daily)
+            est_high = math.ceil(gain_needed / pess_daily)
+            estimation_mode = "model"
+        else:
+            est_mid = None
+            est_low = None
+            est_high = None
+            estimation_mode = "review"
 
-        if low_data:
+        if low_data and est_low is not None and est_high is not None:
             mid = (est_low + est_high) / 2
-            half = (est_high - est_low) / 2 * 1.5
+            half = max((est_high - est_low) / 2 * 1.5, 1)
             est_low = max(1, math.floor(mid - half))
             est_high = math.ceil(mid + half)
 
+        loss_per_lot = (atr / point) * tick_val if point > 0 else 0.0
         margin_per_lot = loss_per_lot * rec_lot
         survival = math.floor((capital * daily_loss_pct) / margin_per_lot) if margin_per_lot > 0 else 99
 
@@ -216,9 +253,9 @@ def compute_milestones(
             "est_days_mid": est_mid,
             "est_days_low": est_low,
             "est_days_high": est_high,
+            "estimation_mode": estimation_mode,
             "consecutive_loss_survival": survival,
             "data_quality": stats["data_quality"],
-            "lot_capped": at_max_lot,
             "overrides_applied": list(overrides.keys()),
         })
 
