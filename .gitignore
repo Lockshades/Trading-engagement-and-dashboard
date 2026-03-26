@@ -1,0 +1,40 @@
+# ── Node / Frontend ──────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.local
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ── Environment & Secrets ────────────────────────────────
+.env
+.env.*
+*.key
+secrets.json
+
+# ── OS artifacts ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Keep these ───────────────────────────────────────────
+# .vscode/extensions.json  — intentionally not ignored (useful for team)
+# package-lock.json        — intentionally tracked (reproducible installs)

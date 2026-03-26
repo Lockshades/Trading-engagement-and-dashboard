@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/tmp/**)",
+      "Bash(pandoc \"C:\\\\Users\\\\locks\\\\Downloads\\\\dashboard_features.docx\" -o dashboard_features.md)",
+      "Bash(python scripts/office/unpack.py \"C:/Users/locks/Downloads/dashboard_features.docx\" /tmp/dashboard_unpacked/)",
+      "Bash(python -c \":*)",
+      "Bash(pip install:*)",
+      "Bash(pip show:*)",
+      "Bash(python -m pytest tests/test_target_planner.py -v)",
+      "Bash(python -m pytest tests/test_target_planner.py::test_milestones_start_below_target -v)",
+      "Bash(python -m pytest tests/test_target_planner.py -v --tb=short)",
+      "Bash(tee test_output.txt)"
+    ]
+  }
+}

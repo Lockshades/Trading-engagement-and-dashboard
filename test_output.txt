@@ -1,0 +1,18 @@
+============================= test session starts =============================
+platform win32 -- Python 3.11.4, pytest-7.4.3, pluggy-1.6.0 -- C:\Users\locks\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\locks\OneDrive\Documents\Trading engagement and dashboard
+plugins: anyio-3.7.1, langsmith-0.4.34, asyncio-0.21.1, typeguard-2.13.3
+asyncio: mode=Mode.STRICT
+collecting ... collected 8 items
+
+tests/test_target_planner.py::test_analyze_history_win_rate PASSED       [ 12%]
+tests/test_target_planner.py::test_analyze_history_low_data_warning PASSED [ 25%]
+tests/test_target_planner.py::test_analyze_history_no_history_returns_defaults PASSED [ 37%]
+tests/test_target_planner.py::test_analyze_history_consecutive_losses PASSED [ 50%]
+tests/test_target_planner.py::test_milestones_start_below_target PASSED  [ 62%]
+tests/test_target_planner.py::test_milestone_lot_increases_with_capital PASSED [ 75%]
+tests/test_target_planner.py::test_confidence_band_wider_on_low_data PASSED [ 87%]
+tests/test_target_planner.py::test_override_win_rate_applied PASSED      [100%]
+
+============================== 8 passed in 0.15s ==============================
