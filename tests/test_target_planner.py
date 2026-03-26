@@ -37,3 +37,44 @@ def test_analyze_history_consecutive_losses():
     ]
     stats = analyze_history(deals)
     assert stats["max_consecutive_losses"] == 2
+
+
+from target_planner import compute_milestones
+
+SAMPLE_STATS = {
+    "win_rate": 0.60, "avg_win_ngn": 3000.0, "avg_loss_ngn": 1500.0,
+    "std_win": 500.0, "std_loss": 400.0, "avg_trades_per_day": 3.0,
+    "marginal_cutoff": 4, "max_consecutive_losses": 2,
+    "total_trading_days": 20, "low_data_warning": False,
+    "data_quality": "MEDIUM", "no_history": False,
+}
+
+SAMPLE_PAIR_INFO = {
+    "symbol": "ETHUSDm", "volume_min": 0.1, "volume_step": 0.1,
+    "volume_max": 100.0, "trade_tick_value": 160.0, "point": 0.01,
+    "atr": 15.0,
+}
+
+def test_milestones_start_below_target():
+    ms = compute_milestones(100_000, 200_000, SAMPLE_STATS, SAMPLE_PAIR_INFO, {}, 0.01, 0.02)
+    assert len(ms) >= 1
+    assert ms[-1]["capital_end"] >= 200_000
+
+def test_milestone_lot_increases_with_capital():
+    ms = compute_milestones(100_000, 500_000, SAMPLE_STATS, SAMPLE_PAIR_INFO, {}, 0.01, 0.02)
+    lots = [m["lot_size"] for m in ms]
+    assert lots == sorted(lots)
+
+def test_confidence_band_wider_on_low_data():
+    low_stats  = {**SAMPLE_STATS, "low_data_warning": True,  "data_quality": "LOW"}
+    high_stats = {**SAMPLE_STATS, "low_data_warning": False, "data_quality": "HIGH"}
+    ms_low  = compute_milestones(100_000, 200_000, low_stats,  SAMPLE_PAIR_INFO, {}, 0.01, 0.02)
+    ms_high = compute_milestones(100_000, 200_000, high_stats, SAMPLE_PAIR_INFO, {}, 0.01, 0.02)
+    band_low  = ms_low[0]["est_days_high"]  - ms_low[0]["est_days_low"]
+    band_high = ms_high[0]["est_days_high"] - ms_high[0]["est_days_low"]
+    assert band_low > band_high
+
+def test_override_win_rate_applied():
+    ms_base     = compute_milestones(100_000, 200_000, SAMPLE_STATS, SAMPLE_PAIR_INFO, {},                  0.01, 0.02)
+    ms_override = compute_milestones(100_000, 200_000, SAMPLE_STATS, SAMPLE_PAIR_INFO, {"win_rate": 0.80}, 0.01, 0.02)
+    assert ms_override[0]["est_days_mid"] < ms_base[0]["est_days_mid"]
