@@ -498,6 +498,50 @@ def kpi_today(
         mt5.shutdown()
 
 
+@app.get("/marginal")
+def marginal(
+    balance: Optional[float] = None,
+    daily_loss_pct: Optional[float] = 0.02,
+    risk_pct: Optional[float] = 0.01,
+    symbol: Optional[str] = None,
+    history_days: Optional[int] = HISTORY_LOOKBACK_DAYS,
+    use_all_history: bool = False,
+):
+    if not mt5.initialize():
+        return {"error": f"MT5 connection failed: {mt5.last_error()}"}
+
+    try:
+        balance_ngn, balance_source, account_snapshot = resolve_balance_details(balance)
+        daily_loss_pct = resolve_ratio(daily_loss_pct, 0.02)
+        risk_pct = resolve_ratio(risk_pct, 0.01)
+        date_to = datetime.now(tz=timezone.utc)
+        date_from, history_window_days, history_window_label = resolve_history_window(
+            history_days, use_all_history, date_to,
+        )
+        scored_pairs = score_watchlist(balance_ngn, daily_loss_pct, risk_pct)
+        planning_symbol = resolve_planning_symbol(symbol, scored_pairs)
+        pair_info = get_pair_info(planning_symbol)
+        all_deals = get_history_deals(date_from, date_to)
+        deals = [deal for deal in all_deals if deal.get("symbol") == planning_symbol]
+        history_stats = analyze_history(deals)
+
+        return {
+            "balance_ngn": balance_ngn,
+            "balance_source": balance_source,
+            "account_snapshot": account_snapshot,
+            "planning_symbol": planning_symbol,
+            "history_window_days": history_window_days,
+            "history_window_label": history_window_label,
+            "history_deals_count": len(deals),
+            "history_total_deals_count": len(all_deals),
+            "history_deals": deals,
+            "history_stats": history_stats,
+            "pair_info": pair_info,
+        }
+    finally:
+        mt5.shutdown()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}

@@ -474,3 +474,51 @@ def test_kpi_endpoint_uses_requested_history_window(stub_mt5_ok, monkeypatch):
     assert captured["days"] == 180
     assert body["history_window_days"] == 180
     assert body["history_window_label"] == "Last 180 days"
+
+
+def test_marginal_returns_history_deals_for_symbol(stub_mt5_ok, monkeypatch):
+    """GET /marginal filters deals to the requested symbol."""
+    monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
+        {"symbol": "BTCUSDm", "classification": "SAFE", "score": 88},
+    ])
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
+        "symbol": symbol, "volume_min": 0.01, "volume_step": 0.01,
+        "volume_max": 100.0, "trade_tick_value": 160.0, "point": 0.01, "atr": 15.0,
+    })
+    monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [
+        {"symbol": "BTCUSDm", "profit": 1500.0, "volume": 0.01, "time": 1000},
+        {"symbol": "BTCUSDm", "profit": -300.0, "volume": 0.01, "time": 2000},
+        {"symbol": "ETHUSDm", "profit": 800.0,  "volume": 0.02, "time": 3000},
+    ])
+
+    status, body = request_json("GET", "/marginal?balance=150000&symbol=BTCUSDm")
+    assert status == 200
+    assert body["planning_symbol"] == "BTCUSDm"
+    assert body["history_deals_count"] == 2
+    assert body["history_total_deals_count"] == 3
+    assert len(body["history_deals"]) == 2
+    assert all(d["symbol"] == "BTCUSDm" for d in body["history_deals"])
+    assert body["balance_ngn"] == 150_000
+    assert "pair_info" in body
+    assert "history_stats" in body
+    assert "milestones" not in body   # /marginal never returns milestones
+
+
+def test_marginal_falls_back_to_mt5_balance(stub_mt5_ok, monkeypatch):
+    """/marginal uses MT5 balance when no balance param provided."""
+    monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
+        {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88},
+    ])
+    # IMPORTANT: must patch get_pair_info to avoid get_pair_info calling mt5.symbol_info
+    # which is not stubbed by stub_mt5_ok. Without this patch the call succeeds but
+    # returns the hardcoded default pair info dict silently, not what we intend to test.
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
+        "symbol": symbol, "volume_min": 0.1, "volume_step": 0.1,
+        "volume_max": 100.0, "trade_tick_value": 160.0, "point": 0.01, "atr": 15.0,
+    })
+    monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
+
+    status, body = request_json("GET", "/marginal")
+    assert status == 200
+    assert body["balance_source"] == "mt5_balance"  # from stub_mt5_ok fixture
+    assert body["history_deals"] == []
