@@ -5,6 +5,7 @@ const API = 'http://localhost:8000';
 
 const DEFAULT_SETTINGS = {
   balance:       150000,
+  useMt5Balance: true,
   dailyLossPct:  2,
   riskPct:       1,
 };
@@ -14,6 +15,54 @@ function loadSettings() {
     const raw = localStorage.getItem('riskScannerSettings');
     return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
   } catch { return { ...DEFAULT_SETTINGS }; }
+}
+
+function loadSelectedSymbol() {
+  try {
+    return localStorage.getItem('riskScannerSelectedSymbol') || null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSelectedSymbol(symbol) {
+  try {
+    if (symbol) localStorage.setItem('riskScannerSelectedSymbol', symbol);
+    else localStorage.removeItem('riskScannerSelectedSymbol');
+  } catch {
+    // Ignore storage failures and continue with in-memory state.
+  }
+}
+
+function getRequestedBalance(settings) {
+  return settings.useMt5Balance ? null : Number(settings.balance);
+}
+
+function getMt5SnapshotBalance(accountSnapshot) {
+  if (!accountSnapshot) return null;
+
+  const balance = Number(accountSnapshot.balance || 0);
+  if (balance > 0) return balance;
+
+  const equity = Number(accountSnapshot.equity || 0);
+  if (equity > 0) return equity;
+
+  return null;
+}
+
+function getMt5SnapshotSource(accountSnapshot) {
+  if (!accountSnapshot) return null;
+  if (Number(accountSnapshot.balance || 0) > 0) return 'mt5_balance';
+  if (Number(accountSnapshot.equity || 0) > 0) return 'mt5_equity';
+  return null;
+}
+
+function formatBalanceSource(source) {
+  if (source === 'manual_override') return 'Manual override';
+  if (source === 'mt5_balance') return 'MT5 balance';
+  if (source === 'mt5_equity') return 'MT5 equity fallback';
+  if (source === 'mt5_unavailable') return 'MT5 unavailable';
+  return 'Balance source';
 }
 
 const CLASS_COLOURS = {
@@ -74,25 +123,52 @@ function ScoreBar({ score, classification }) {
   );
 }
 
-function PairCard({ pair }) {
-  const [expanded, setExpanded] = useState(false);
+function PairCard({ pair, selected, onSelect }) {
   const c = CLASS_COLOURS[pair.classification] || CLASS_COLOURS.RISKY;
   const badgeColour = CLASS_BADGE_COLOURS[pair.asset_class] || '#888';
   const dims = pair.dimensions;
 
   return (
-    <div onClick={() => setExpanded(e => !e)} style={{
+    <div onClick={() => onSelect(pair.symbol)} style={{
       background: c.bg, border: `1px solid ${c.border}33`,
-      borderLeft: `3px solid ${c.border}`, borderRadius: 8,
-      padding: '12px 14px', cursor: 'pointer', transition: 'border-color 0.2s',
+      borderLeft: `3px solid ${selected ? '#38bdf8' : c.border}`, borderRadius: 8,
+      padding: '12px 14px', cursor: 'pointer', transition: 'border-color 0.2s, box-shadow 0.2s',
+      boxShadow: selected ? '0 0 0 1px #38bdf855 inset' : 'none',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontWeight: 700, fontSize: 14, color: '#f0f0f0' }}>{pair.symbol}</span>
           <Badge label={pair.class_label} colour={badgeColour} />
           <span style={{ fontSize: 11, color: '#666' }}>#{pair.class_rank}</span>
+          {selected && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, color: '#38bdf8',
+              border: '1px solid #38bdf855', background: '#38bdf822',
+              borderRadius: 999, padding: '2px 8px',
+            }}>
+              Selected
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(pair.symbol);
+            }}
+            style={{
+              background: selected ? '#38bdf822' : 'transparent',
+              color: selected ? '#38bdf8' : '#666',
+              border: `1px solid ${selected ? '#38bdf8' : '#333'}`,
+              borderRadius: 6,
+              padding: '4px 10px',
+              cursor: 'pointer',
+              fontSize: 11,
+              fontWeight: 600,
+            }}
+          >
+            {selected ? 'Used In Target' : 'Use In Target'}
+          </button>
           <span style={{ fontSize: 12, color: '#aaa' }}>
             {pair.price?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 5 })}
           </span>
@@ -119,30 +195,28 @@ function PairCard({ pair }) {
         })}
       </div>
 
-      {expanded && (
-        <div style={{ marginTop: 12, borderTop: '1px solid #333', paddingTop: 10 }}>
-          {Object.entries(DIM_NAMES).map(([key, name]) => {
-            const d = dims[key];
-            const colour = LABEL_COLOURS[d.label] || '#888';
-            return (
-              <div key={key} style={{
-                display: 'flex', justifyContent: 'space-between',
-                alignItems: 'flex-start', padding: '4px 0',
-                borderBottom: '1px solid #1e1e1e', gap: 10,
-              }}>
-                <span style={{ color: '#888', fontSize: 12, minWidth: 110 }}>{name}</span>
-                <span style={{ color: colour, fontSize: 11, fontWeight: 600, minWidth: 50 }}>{d.label}</span>
-                <span style={{ color: '#999', fontSize: 11, textAlign: 'right' }}>{d.description}</span>
-              </div>
-            );
-          })}
-          {pair.red_flags?.length > 0 && (
-            <div style={{ marginTop: 8, color: '#ef4444', fontSize: 11 }}>
-              Gate failed: {pair.red_flags.join(', ')}
+      <div style={{ marginTop: 12, borderTop: '1px solid #333', paddingTop: 10 }}>
+        {Object.entries(DIM_NAMES).map(([key, name]) => {
+          const d = dims[key];
+          const colour = LABEL_COLOURS[d.label] || '#888';
+          return (
+            <div key={key} style={{
+              display: 'flex', justifyContent: 'space-between',
+              alignItems: 'flex-start', padding: '4px 0',
+              borderBottom: '1px solid #1e1e1e', gap: 10,
+            }}>
+              <span style={{ color: '#888', fontSize: 12, minWidth: 110 }}>{name}</span>
+              <span style={{ color: colour, fontSize: 11, fontWeight: 600, minWidth: 50 }}>{d.label}</span>
+              <span style={{ color: '#999', fontSize: 11, textAlign: 'right' }}>{d.description}</span>
             </div>
-          )}
-        </div>
-      )}
+          );
+        })}
+        {pair.red_flags?.length > 0 && (
+          <div style={{ marginTop: 8, color: '#ef4444', fontSize: 11 }}>
+            Gate failed: {pair.red_flags.join(', ')}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -199,12 +273,15 @@ function SettingsInput({ value, onChange, prefix, suffix, type = 'number', min, 
   );
 }
 
-function SettingsTab({ settings, onSave }) {
+function SettingsTab({ settings, onSave, liveBalance, balanceSource, accountSnapshot }) {
   const [local, setLocal] = useState({ ...settings });
 
   const set = (key) => (val) => setLocal(prev => ({ ...prev, [key]: val }));
 
   const isDirty = JSON.stringify(local) !== JSON.stringify(settings);
+  const mt5SnapshotBalance = getMt5SnapshotBalance(accountSnapshot);
+  const mt5SnapshotSource = getMt5SnapshotSource(accountSnapshot);
+  const previewBalance = local.useMt5Balance ? mt5SnapshotBalance : Number(local.balance);
 
   return (
     <div style={{ maxWidth: 520 }}>
@@ -222,11 +299,49 @@ function SettingsTab({ settings, onSave }) {
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '16px 18px', background: '#111', borderRadius: 8, border: '1px solid #1e1e1e' }}>
             <SettingRow
-              label="Account Balance"
-              hint="MT5 shows NGN 0 for this account - enter your actual balance here."
+              label="Balance Source"
+              hint="Use the live MT5 account value by default, or force a manual override."
             >
-              <SettingsInput prefix="NGN" value={local.balance} onChange={set('balance')} min={0} step={1000} />
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {[
+                  { active: local.useMt5Balance, label: 'Use MT5', value: true },
+                  { active: !local.useMt5Balance, label: 'Manual', value: false },
+                ].map(({ active, label, value }) => (
+                  <button
+                    key={label}
+                    onClick={() => set('useMt5Balance')(value)}
+                    style={{
+                      background: active ? '#38bdf822' : 'transparent',
+                      color: active ? '#38bdf8' : '#666',
+                      border: `1px solid ${active ? '#38bdf8' : '#333'}`,
+                      borderRadius: 6,
+                      padding: '6px 12px',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <span style={{ fontSize: 11, color: '#555' }}>
+                {local.useMt5Balance
+                  ? mt5SnapshotBalance !== null
+                    ? `MT5 snapshot: ${formatBalanceSource(mt5SnapshotSource || balanceSource)} (${mt5SnapshotBalance.toLocaleString()})`
+                    : 'No MT5 balance snapshot is available yet. Save & Rescan to retry the live account lookup.'
+                  : 'Manual balance below will override MT5 for scanner and planner requests.'}
+              </span>
             </SettingRow>
+
+            {!local.useMt5Balance && (
+              <SettingRow
+                label="Manual Balance Override"
+                hint="Only use this if you want to override the balance coming from MT5."
+              >
+                <SettingsInput prefix="NGN" value={local.balance} onChange={set('balance')} min={0} step={1000} />
+              </SettingRow>
+            )}
           </div>
         </div>
 
@@ -241,9 +356,21 @@ function SettingsTab({ settings, onSave }) {
               hint="Maximum % of balance you allow yourself to lose in one day."
             >
               <SettingsInput value={local.dailyLossPct} onChange={set('dailyLossPct')} suffix="%" min={0.1} max={20} step={0.5} />
-              <span style={{ fontSize: 11, color: '#f59e0b', marginTop: 2 }}>
-                = NGN {(Number(local.balance) * Number(local.dailyLossPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} at current balance
-              </span>
+              {local.useMt5Balance ? (
+                previewBalance !== null ? (
+                  <span style={{ fontSize: 11, color: '#555', marginTop: 2 }}>
+                    Uses the live MT5 balance on the next scan. Preview: NGN {(previewBalance * Number(local.dailyLossPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: '#555', marginTop: 2 }}>
+                    Waiting for a live MT5 balance snapshot before showing the preview amount.
+                  </span>
+                )
+              ) : (
+                <span style={{ fontSize: 11, color: '#f59e0b', marginTop: 2 }}>
+                  = NGN {(Number(local.balance) * Number(local.dailyLossPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} at current balance
+                </span>
+              )}
             </SettingRow>
 
             <SettingRow
@@ -251,9 +378,21 @@ function SettingsTab({ settings, onSave }) {
               hint="% of balance you risk on each individual trade (used to calculate recommended lot size)."
             >
               <SettingsInput value={local.riskPct} onChange={set('riskPct')} suffix="%" min={0.1} max={10} step={0.1} />
-              <span style={{ fontSize: 11, color: '#38bdf8', marginTop: 2 }}>
-                = NGN {(Number(local.balance) * Number(local.riskPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} per trade
-              </span>
+              {local.useMt5Balance ? (
+                previewBalance !== null ? (
+                  <span style={{ fontSize: 11, color: '#555', marginTop: 2 }}>
+                    Uses the live MT5 balance on the next scan. Preview: NGN {(previewBalance * Number(local.riskPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} per trade
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: '#555', marginTop: 2 }}>
+                    Waiting for a live MT5 balance snapshot before showing the per-trade preview.
+                  </span>
+                )
+              ) : (
+                <span style={{ fontSize: 11, color: '#38bdf8', marginTop: 2 }}>
+                  = NGN {(Number(local.balance) * Number(local.riskPct) / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })} per trade
+                </span>
+              )}
             </SettingRow>
           </div>
         </div>
@@ -282,6 +421,7 @@ function SettingsTab({ settings, onSave }) {
 
 export default function RiskScanner() {
   const [settings, setSettings]    = useState(loadSettings);
+  const [selectedSymbol, setSelectedSymbol] = useState(loadSelectedSymbol);
   const [tab, setTab]              = useState('scanner');
   const [data, setData]            = useState(null);
   const [loading, setLoading]      = useState(false);
@@ -299,7 +439,7 @@ export default function RiskScanner() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          balance:        Number(s.balance),
+          balance:        getRequestedBalance(s),
           daily_loss_pct: Number(s.dailyLossPct) / 100,
           risk_pct:       Number(s.riskPct) / 100,
         }),
@@ -307,6 +447,10 @@ export default function RiskScanner() {
       if (!res.ok) throw new Error(`API error ${res.status}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
+      if (selectedSymbol && !(json.pairs || []).some(pair => pair.symbol === selectedSymbol)) {
+        persistSelectedSymbol(null);
+        setSelectedSymbol(null);
+      }
       setData(json);
       setLast(new Date().toLocaleTimeString());
     } catch (e) {
@@ -350,6 +494,11 @@ export default function RiskScanner() {
     }, {});
   }, [data]);
 
+  const selectedPair = useMemo(
+    () => data?.pairs?.find(pair => pair.symbol === selectedSymbol) || null,
+    [data, selectedSymbol]
+  );
+
   const classes = [
     { key: 'crypto',  label: 'Crypto',  colour: CLASS_BADGE_COLOURS.crypto },
     { key: 'forex',   label: 'Forex',   colour: CLASS_BADGE_COLOURS.forex },
@@ -365,6 +514,11 @@ export default function RiskScanner() {
     padding: '8px 16px', cursor: 'pointer',
     fontSize: 13, fontWeight: 600, transition: 'all 0.15s',
   });
+
+  const handleSelectPair = (symbol) => {
+    persistSelectedSymbol(symbol);
+    setSelectedSymbol(symbol);
+  };
 
   return (
     <div style={{
@@ -401,11 +555,24 @@ export default function RiskScanner() {
 
         {/* Settings tab */}
         {tab === 'settings' && (
-          <SettingsTab settings={settings} onSave={handleSaveSettings} />
+          <SettingsTab
+            settings={settings}
+            onSave={handleSaveSettings}
+            liveBalance={data?.balance_ngn}
+            balanceSource={data?.balance_source}
+            accountSnapshot={data?.account_snapshot}
+          />
         )}
 
         {tab === 'target' && (
-          <TargetPlanner settings={settings} />
+          <TargetPlanner
+            settings={settings}
+            liveBalance={data?.balance_ngn}
+            balanceSource={data?.balance_source}
+            accountSnapshot={data?.account_snapshot}
+            selectedSymbol={selectedSymbol}
+            selectedPair={selectedPair}
+          />
         )}
 
         {/* Scanner tab */}
@@ -421,6 +588,18 @@ export default function RiskScanner() {
                 <div>
                   <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance</div>
                   <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>NGN {data.balance_ngn?.toLocaleString()}</div>
+                  {data.balance_source && (
+                    <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>{formatBalanceSource(data.balance_source)}</div>
+                  )}
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target Pair</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: selectedPair ? '#38bdf8' : '#666' }}>
+                    {selectedPair?.symbol || 'Not selected'}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
+                    {selectedPair ? `${selectedPair.classification} · ${selectedPair.score}/100` : 'Choose from scanner cards'}
+                  </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Daily Limit</div>
@@ -491,9 +670,16 @@ export default function RiskScanner() {
             {filtered.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontSize: 11, color: '#444', marginBottom: 2 }}>
-                  {filtered.length} pair{filtered.length !== 1 ? 's' : ''} shown - click a card to expand details
+                  {filtered.length} pair{filtered.length !== 1 ? 's' : ''} shown - each card stays expanded, and clicking a card selects the pair used in the Target tab and KPI flow
                 </div>
-                {filtered.map(pair => <PairCard key={pair.symbol} pair={pair} />)}
+                {filtered.map(pair => (
+                  <PairCard
+                    key={pair.symbol}
+                    pair={pair}
+                    selected={pair.symbol === selectedSymbol}
+                    onSelect={handleSelectPair}
+                  />
+                ))}
               </div>
             )}
 

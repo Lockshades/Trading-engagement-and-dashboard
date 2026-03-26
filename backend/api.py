@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import MetaTrader5 as mt5
 from pydantic import BaseModel, Field
 
-from data_fetcher import BARS, TIMEFRAME, calc_atr, score_symbol, FALLBACK_BALANCE_NGN
+from data_fetcher import BARS, TIMEFRAME, calc_atr, score_symbol
 from target_planner import analyze_history, compute_milestones, get_kpi_today
 
 
@@ -61,6 +61,7 @@ CLASS_LABELS = {
 CLASSIFICATION_ORDER = {"SAFE": 0, "MODERATE": 1, "RISKY": 2}
 DEFAULT_PLAN_SYMBOL = "ETHUSDm"
 HISTORY_LOOKBACK_DAYS = 90
+ALL_HISTORY_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
 ALLOWED_OVERRIDE_KEYS = {"win_rate", "avg_win_ngn", "avg_loss_ngn"}
 
 
@@ -75,6 +76,9 @@ class PlanRequest(BaseModel):
     balance: Optional[float] = None
     daily_loss_pct: Optional[float] = 0.02
     risk_pct: Optional[float] = 0.01
+    planning_symbol: Optional[str] = None
+    history_days: Optional[int] = HISTORY_LOOKBACK_DAYS
+    use_all_history: bool = False
     overrides: dict[str, float] = Field(default_factory=dict)
 
 
@@ -91,15 +95,47 @@ def resolve_ratio(value: Optional[float], default: float) -> float:
     return value if value is not None and value > 0 else default
 
 
+def build_account_snapshot(account) -> Optional[dict]:
+    if not account:
+        return None
+
+    return {
+        "login": getattr(account, "login", None),
+        "currency": getattr(account, "currency", None),
+        "balance": float(getattr(account, "balance", 0.0) or 0.0),
+        "equity": float(getattr(account, "equity", 0.0) or 0.0),
+        "margin_free": float(getattr(account, "margin_free", 0.0) or 0.0),
+    }
+
+
+def resolve_balance_details(requested_balance: Optional[float]) -> tuple[float, str, Optional[dict]]:
+    account = mt5.account_info()
+    snapshot = build_account_snapshot(account)
+
+    if requested_balance is not None and requested_balance > 0:
+        return requested_balance, "manual_override", snapshot
+
+    if account and getattr(account, "balance", 0.0) and account.balance > 0:
+        return float(account.balance), "mt5_balance", snapshot
+
+    if account and getattr(account, "equity", 0.0) and account.equity > 0:
+        return float(account.equity), "mt5_equity", snapshot
+
+    if account is not None:
+        return 0.0, "mt5_balance", snapshot
+
+    return 0.0, "mt5_unavailable", snapshot
+
+
 def resolve_balance(requested_balance: Optional[float]) -> float:
+    balance, _, _ = resolve_balance_details(requested_balance)
+    return balance
+
+
+def resolve_request_balance_payload(requested_balance: Optional[float]) -> Optional[float]:
     if requested_balance is not None and requested_balance > 0:
         return requested_balance
-
-    account = mt5.account_info()
-    if account and account.balance and account.balance > 0:
-        return account.balance
-
-    return FALLBACK_BALANCE_NGN
+    return None
 
 
 def summarize_pairs(pairs: list[dict]) -> dict:
@@ -154,6 +190,16 @@ def select_planning_symbol(pairs: list[dict]) -> str:
         ),
     )
     return ranked[0].get("symbol") or DEFAULT_PLAN_SYMBOL
+
+
+def resolve_planning_symbol(requested_symbol: Optional[str], pairs: list[dict]) -> str:
+    if requested_symbol:
+        if any(pair.get("symbol") == requested_symbol for pair in pairs):
+            return requested_symbol
+        if ensure_symbol_info(requested_symbol) is not None:
+            return requested_symbol
+
+    return select_planning_symbol(pairs)
 
 
 def ensure_symbol_info(symbol: str):
@@ -269,6 +315,19 @@ def sanitize_overrides(overrides: Optional[dict]) -> dict:
     return clean
 
 
+def resolve_history_window(
+    history_days: Optional[float],
+    use_all_history: bool,
+    date_to: datetime,
+) -> tuple[datetime, Optional[int], str]:
+    if use_all_history:
+        return ALL_HISTORY_START, None, "All history"
+
+    days = int(history_days) if history_days is not None else HISTORY_LOOKBACK_DAYS
+    days = max(days, 1)
+    return date_to - timedelta(days=days), days, f"Last {days} days"
+
+
 @app.post("/scan")
 def scan(req: Optional[ScanRequest] = None):
     req = req or ScanRequest()
@@ -277,13 +336,15 @@ def scan(req: Optional[ScanRequest] = None):
         return {"error": f"MT5 connection failed: {mt5.last_error()}"}
 
     try:
-        balance = resolve_balance(req.balance)
+        balance, balance_source, account_snapshot = resolve_balance_details(req.balance)
         daily_loss_pct = resolve_ratio(req.daily_loss_pct, 0.02)
         risk_pct = resolve_ratio(req.risk_pct, 0.01)
         pairs = score_watchlist(balance, daily_loss_pct, risk_pct)
 
         return {
             "balance_ngn": balance,
+            "balance_source": balance_source,
+            "account_snapshot": account_snapshot,
             "daily_limit_ngn": balance * daily_loss_pct,
             "risk_per_trade": balance * risk_pct,
             "daily_loss_pct": daily_loss_pct,
@@ -301,16 +362,20 @@ def plan(req: PlanRequest):
         return {"error": f"MT5 connection failed: {mt5.last_error()}"}
 
     try:
-        balance = resolve_balance(req.balance)
+        balance, balance_source, account_snapshot = resolve_balance_details(req.balance)
         daily_loss_pct = resolve_ratio(req.daily_loss_pct, 0.02)
         risk_pct = resolve_ratio(req.risk_pct, 0.01)
-        scored_pairs = score_watchlist(balance, daily_loss_pct, risk_pct)
-        planning_symbol = select_planning_symbol(scored_pairs)
-        pair_info = get_pair_info(planning_symbol)
-
         date_to = datetime.now(tz=timezone.utc)
-        date_from = date_to - timedelta(days=HISTORY_LOOKBACK_DAYS)
-        deals = get_history_deals(date_from, date_to)
+        date_from, history_window_days, history_window_label = resolve_history_window(
+            req.history_days,
+            req.use_all_history,
+            date_to,
+        )
+        scored_pairs = score_watchlist(balance, daily_loss_pct, risk_pct)
+        planning_symbol = resolve_planning_symbol(req.planning_symbol, scored_pairs)
+        pair_info = get_pair_info(planning_symbol)
+        all_deals = get_history_deals(date_from, date_to)
+        deals = [deal for deal in all_deals if deal.get("symbol") == planning_symbol]
         history_stats = analyze_history(deals)
         overrides = sanitize_overrides(req.overrides)
 
@@ -328,11 +393,18 @@ def plan(req: PlanRequest):
 
         return {
             "balance_ngn": balance,
+            "balance_source": balance_source,
+            "account_snapshot": account_snapshot,
             "target_ngn": req.target_ngn,
             "daily_loss_pct": daily_loss_pct,
             "risk_pct": risk_pct,
+            "history_window_days": history_window_days,
+            "history_window_label": history_window_label,
+            "history_deals_count": len(deals),
+            "history_total_deals_count": len(all_deals),
             "planning_symbol": planning_symbol,
             "history_stats": history_stats,
+            "history_deals": deals,
             "pair_info": pair_info,
             "milestones": milestones,
         }
@@ -346,22 +418,29 @@ def kpi_today(
     daily_loss_pct: Optional[float] = 0.02,
     risk_pct: Optional[float] = 0.01,
     target_ngn: float = 1_000_000,
+    planning_symbol: Optional[str] = None,
+    history_days: Optional[int] = HISTORY_LOOKBACK_DAYS,
+    use_all_history: bool = False,
 ):
     if not mt5.initialize():
         return {"error": f"MT5 connection failed: {mt5.last_error()}"}
 
     try:
-        resolved_balance = resolve_balance(balance)
+        resolved_balance, balance_source, account_snapshot = resolve_balance_details(balance)
         daily_loss_pct = resolve_ratio(daily_loss_pct, 0.02)
         risk_pct = resolve_ratio(risk_pct, 0.01)
 
-        scored_pairs = score_watchlist(resolved_balance, daily_loss_pct, risk_pct)
-        planning_symbol = select_planning_symbol(scored_pairs)
-        pair_info = get_pair_info(planning_symbol)
-
         now_utc = datetime.now(tz=timezone.utc)
-        history_start = now_utc - timedelta(days=HISTORY_LOOKBACK_DAYS)
-        history_deals = get_history_deals(history_start, now_utc)
+        history_start, history_window_days, history_window_label = resolve_history_window(
+            history_days,
+            use_all_history,
+            now_utc,
+        )
+        scored_pairs = score_watchlist(resolved_balance, daily_loss_pct, risk_pct)
+        active_symbol = resolve_planning_symbol(planning_symbol, scored_pairs)
+        pair_info = get_pair_info(active_symbol)
+        all_history_deals = get_history_deals(history_start, now_utc)
+        history_deals = [deal for deal in all_history_deals if deal.get("symbol") == active_symbol]
         history_stats = analyze_history(history_deals)
 
         milestones = []
@@ -384,7 +463,10 @@ def kpi_today(
         kpi = {}
         if current_milestone:
             today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-            deals_today = get_history_deals(today_start, now_utc)
+            deals_today = [
+                deal for deal in get_history_deals(today_start, now_utc)
+                if deal.get("symbol") == active_symbol
+            ]
             pip_value_ngn = 0.0
             if pair_info["point"] > 0:
                 pip_value_ngn = (
@@ -402,7 +484,13 @@ def kpi_today(
         return {
             "date": now_utc.date().isoformat(),
             "balance_ngn": resolved_balance,
-            "planning_symbol": planning_symbol,
+            "balance_source": balance_source,
+            "account_snapshot": account_snapshot,
+            "history_window_days": history_window_days,
+            "history_window_label": history_window_label,
+            "history_deals_count": len(history_deals),
+            "history_total_deals_count": len(all_history_deals),
+            "planning_symbol": active_symbol,
             "current_milestone": current_milestone,
             "kpi": kpi,
         }

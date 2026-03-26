@@ -139,6 +139,7 @@ def compute_milestones(
 
     vol_min = max(pair_info["volume_min"], 0.01)
     vol_step = max(pair_info["volume_step"], 0.01)
+    vol_max = max(pair_info.get("volume_max", vol_min), vol_min)
     atr = max(pair_info["atr"], 0.0)
     tick_val = max(pair_info["trade_tick_value"], 0.0)
     point = max(pair_info["point"], 1e-10)
@@ -152,13 +153,19 @@ def compute_milestones(
             break
 
         loss_per_lot = (atr / point) * tick_val if point > 0 else 0.0
-        rec_lot = (capital * risk_pct) / loss_per_lot if loss_per_lot > 0 else vol_min
-        rec_lot = max(math.floor(rec_lot / vol_step) * vol_step, vol_min)
-        rec_lot = round(rec_lot, 8)
+        raw_lot = (capital * risk_pct) / loss_per_lot if loss_per_lot > 0 else vol_min
+        min_units = max(int(math.ceil((vol_min - 1e-12) / vol_step)), 1)
+        max_units = max(int(math.floor((vol_max + 1e-12) / vol_step)), min_units)
+        lot_units = max(int(math.floor((raw_lot + 1e-12) / vol_step)), min_units)
+        lot_units = min(lot_units, max_units)
+        rec_lot = round(lot_units * vol_step, 8)
 
-        next_lot = rec_lot + vol_step
+        at_max_lot = lot_units >= max_units
+        next_lot = rec_lot if at_max_lot else round((lot_units + 1) * vol_step, 8)
         capital_for_next = (next_lot * loss_per_lot) / risk_pct if risk_pct > 0 else target_ngn
-        milestone_end = min(capital_for_next, target_ngn) if loss_per_lot > 0 else target_ngn
+        milestone_end = target_ngn if at_max_lot else min(capital_for_next, target_ngn)
+        if milestone_end <= capital:
+            break
 
         daily_target_ngn = capital * daily_loss_pct * 0.5
         pip_val_at_lot = pip_val_per_lot * rec_lot
@@ -211,6 +218,7 @@ def compute_milestones(
             "est_days_high": est_high,
             "consecutive_loss_survival": survival,
             "data_quality": stats["data_quality"],
+            "lot_capped": at_max_lot,
             "overrides_applied": list(overrides.keys()),
         })
 

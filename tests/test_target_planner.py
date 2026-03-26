@@ -156,6 +156,29 @@ def test_override_win_rate_applied():
     assert override_milestones[0]["est_days_mid"] < base_milestones[0]["est_days_mid"]
 
 
+def test_milestones_stop_when_next_tier_would_not_advance_capital():
+    pair_info = {
+        "symbol": "US500m",
+        "volume_min": 0.09,
+        "volume_step": 0.01,
+        "volume_max": 100.0,
+        "trade_tick_value": 1.0,
+        "point": 0.01,
+        "atr": 99.399,
+    }
+    milestones = compute_milestones(
+        100_000,
+        500_000,
+        SAMPLE_STATS,
+        pair_info,
+        {},
+        0.0001,
+        0.02,
+    )
+    assert len(milestones) == 1
+    assert milestones[0]["capital_end"] > milestones[0]["capital_start"]
+
+
 def _make_deals(profits):
     today_ts = int(datetime.combine(date.today(), datetime.min.time()).timestamp())
     return [

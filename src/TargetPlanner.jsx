@@ -1,4 +1,18 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import {
+  ResponsiveContainer,
+  CartesianGrid,
+  Tooltip,
+  XAxis,
+  YAxis,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  ReferenceLine,
+  Area,
+  ComposedChart,
+} from 'recharts';
 
 const API = 'http://localhost:8000';
 
@@ -17,8 +31,222 @@ const QUALITY_COLOURS = {
   NONE: '#ef4444',
 };
 
+const HISTORY_OPTIONS = [
+  { value: '30', label: '30d' },
+  { value: '90', label: '90d' },
+  { value: '180', label: '180d' },
+  { value: '365', label: '365d' },
+  { value: 'all', label: 'All' },
+];
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function sampleStd(values) {
+  if (values.length < 2) return 0;
+  const mean = average(values);
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function computeStats(values) {
+  if (!values.length) return null;
+  const mean = average(values);
+  const std = sampleStd(values);
+  const wins = values.filter((value) => value > 0).length;
+  const losses = values.filter((value) => value <= 0).length;
+  const lossRate = values.length > 0 ? losses / values.length : 0;
+
+  return {
+    n: values.length,
+    mean,
+    std,
+    cv: mean !== 0 ? Math.abs(std / mean) * 100 : 999,
+    winRate: values.length > 0 ? (wins / values.length) * 100 : 0,
+    lossRate,
+  };
+}
+
+function buildMarginalDays(historyDeals, threshold) {
+  if (!Array.isArray(historyDeals) || historyDeals.length === 0) return [];
+
+  const byDay = new Map();
+  [...historyDeals]
+    .sort((left, right) => Number(left.time || 0) - Number(right.time || 0))
+    .forEach((deal) => {
+      const stamp = Number(deal.time || 0) * 1000;
+      const dayKey = new Date(stamp).toISOString().slice(0, 10);
+      if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+      byDay.get(dayKey).push(deal);
+    });
+
+  return [...byDay.entries()].map(([date, deals], dayIndex) => {
+    let cumPnL = 0;
+    let thresholdHit = false;
+    let aboveIndex = 0;
+
+    const trades = deals.map((deal, tradeIndex) => {
+      const wasAboveThreshold = thresholdHit;
+      const pnl = Number(deal.profit || 0);
+      const lockedProfitAtEntry = wasAboveThreshold ? Math.max(cumPnL, 0) : 0;
+      cumPnL += pnl;
+      if (!thresholdHit && cumPnL >= threshold) thresholdHit = true;
+      if (wasAboveThreshold) aboveIndex += 1;
+
+      return {
+        tradeIndex: tradeIndex + 1,
+        pnl,
+        cumPnL,
+        symbol: deal.symbol,
+        volume: Number(deal.volume || 0),
+        aboveThreshold: wasAboveThreshold,
+        aboveIndex: wasAboveThreshold ? aboveIndex : null,
+        lockedProfitAtEntry,
+      };
+    });
+
+    return {
+      day: dayIndex + 1,
+      date,
+      trades,
+      finalPnL: cumPnL,
+      thresholdHit,
+    };
+  });
+}
+
+function computeMarginalCurves(days) {
+  const belowPools = new Map();
+  const abovePools = new Map();
+  const lockedPools = new Map();
+
+  days.forEach((day) => {
+    day.trades.forEach((trade) => {
+      if (!trade.aboveThreshold) {
+        const bucket = belowPools.get(trade.tradeIndex) || [];
+        bucket.push(trade.pnl);
+        belowPools.set(trade.tradeIndex, bucket);
+      }
+
+      if (trade.aboveThreshold && trade.aboveIndex !== null) {
+        const aboveBucket = abovePools.get(trade.aboveIndex) || [];
+        aboveBucket.push(trade.pnl);
+        abovePools.set(trade.aboveIndex, aboveBucket);
+
+        const lockBucket = lockedPools.get(trade.aboveIndex) || [];
+        lockBucket.push(trade.lockedProfitAtEntry);
+        lockedPools.set(trade.aboveIndex, lockBucket);
+      }
+    });
+  });
+
+  const belowCurve = [...belowPools.entries()]
+    .map(([position, values]) => {
+      const stats = computeStats(values);
+      return stats ? { position: `T${position}`, posNum: position, zone: 'below', ...stats } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.posNum - right.posNum);
+
+  const aboveCurve = [...abovePools.entries()]
+    .map(([position, values]) => {
+      const stats = computeStats(values);
+      if (!stats) return null;
+      const lockedValues = lockedPools.get(position) || [];
+      return {
+        position: `+${position}`,
+        posNum: position,
+        zone: 'above',
+        avgLockedProfit: average(lockedValues),
+        ...stats,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.posNum - right.posNum);
+
+  return { belowCurve, aboveCurve };
+}
+
+function buildEconomicsData(belowCurve, aboveCurve) {
+  let totalCost = 0;
+  return [...belowCurve, ...aboveCurve].map((item, index) => {
+    const marginalCost = item.zone === 'above'
+      ? Math.round((item.avgLockedProfit || 0) * (item.lossRate || 0))
+      : 0;
+    totalCost += marginalCost;
+    return {
+      position: item.position,
+      zone: item.zone,
+      mean: Math.round(item.mean),
+      marginalCost,
+      totalCost,
+      averageCost: index >= 0 ? Math.round(totalCost / (index + 1)) : 0,
+      samples: item.n,
+      cv: Math.round(item.cv),
+    };
+  });
+}
+
+function buildSuggestions(aboveCurve) {
+  return aboveCurve.map((item) => {
+    const eligible = item.mean > 0 && item.cv < 35 && item.n >= 20;
+    return {
+      position: item.position,
+      mean: Math.round(item.mean),
+      cv: Math.round(item.cv),
+      samples: item.n,
+      avgLockedProfit: Math.round(item.avgLockedProfit || 0),
+      eligible,
+    };
+  });
+}
+
+function SimpleTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+
+  return (
+    <div style={{ background: '#111', border: '1px solid #333', borderRadius: 8, padding: '10px 12px', fontSize: 11 }}>
+      <div style={{ color: '#aaa', marginBottom: 4 }}>{label}</div>
+      {payload.map((entry) => (
+        <div key={entry.dataKey} style={{ color: entry.color || '#e0e0e0' }}>
+          {entry.name}: {Number(entry.value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function formatMoney(value) {
   return `NGN ${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}`;
+}
+
+function formatBalanceSource(source) {
+  if (source === 'manual_override') return 'Manual override';
+  if (source === 'mt5_balance') return 'MT5 balance';
+  if (source === 'mt5_equity') return 'MT5 equity fallback';
+  if (source === 'mt5_unavailable') return 'MT5 unavailable';
+  return 'Balance source';
+}
+
+function getMt5SnapshotBalance(accountSnapshot) {
+  if (!accountSnapshot) return null;
+
+  const balance = Number(accountSnapshot.balance || 0);
+  if (balance > 0) return balance;
+
+  const equity = Number(accountSnapshot.equity || 0);
+  if (equity > 0) return equity;
+
+  return null;
+}
+
+function getMt5SnapshotSource(accountSnapshot) {
+  if (!accountSnapshot) return null;
+  if (Number(accountSnapshot.balance || 0) > 0) return 'mt5_balance';
+  if (Number(accountSnapshot.equity || 0) > 0) return 'mt5_equity';
+  return null;
 }
 
 function formatDays(low, mid, high) {
@@ -213,9 +441,12 @@ function OverrideInput({ label, value, suffix, onChange, onClear }) {
   );
 }
 
-export default function TargetPlanner({ settings }) {
+export default function TargetPlanner({ settings, liveBalance, balanceSource, accountSnapshot, selectedSymbol, selectedPair }) {
   const [subTab, setSubTab] = useState('path');
   const [targetInput, setTargetInput] = useState('');
+  const [historyRange, setHistoryRange] = useState('90');
+  const [analysisThresholdPct, setAnalysisThresholdPct] = useState(1.0);
+  const [selectedAnalysisDay, setSelectedAnalysisDay] = useState(null);
   const [planData, setPlanData] = useState(null);
   const [kpiData, setKpiData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -224,17 +455,91 @@ export default function TargetPlanner({ settings }) {
   const [overrides, setOverrides] = useState({});
   const [showOverrides, setShowOverrides] = useState(false);
 
-  const balance = Number(settings?.balance || 150000);
+  const fallbackBalance = Number(settings?.balance || 150000);
+  const requestedBalance = settings?.useMt5Balance ? null : fallbackBalance;
+  const mt5SnapshotBalance = getMt5SnapshotBalance(accountSnapshot);
+  const mt5SnapshotSource = getMt5SnapshotSource(accountSnapshot);
+  const balance = Number(
+    settings?.useMt5Balance
+      ? (mt5SnapshotBalance !== null ? mt5SnapshotBalance : 0)
+      : fallbackBalance
+  );
   const dailyLossPct = Number(settings?.dailyLossPct || 2) / 100;
   const riskPct = Number(settings?.riskPct || 1) / 100;
   const parsedTarget = Number(targetInput);
+  const useAllHistory = historyRange === 'all';
+  const historyDays = useAllHistory ? null : Number(historyRange);
+  const hasSelectedSymbol = Boolean(selectedSymbol);
   const hasValidTarget = Number.isFinite(parsedTarget) && parsedTarget > balance;
-  const planMatchesInput = planData && Number(planData.target_ngn) === parsedTarget;
+  const canGeneratePlan = hasSelectedSymbol && hasValidTarget;
+  const planMatchesInput = planData
+    && Number(planData.target_ngn) === parsedTarget
+    && planData.planning_symbol === selectedSymbol
+    && ((planData.history_window_days ?? 'all') === (historyDays ?? 'all'));
   const activePlan = planMatchesInput ? planData : null;
   const totalTradingDays = activePlan?.history_stats?.total_trading_days || 0;
   const noHistory = Boolean(activePlan?.history_stats?.no_history);
   const veryThinHistory = totalTradingDays > 0 && totalTradingDays < 3;
   const lowData = totalTradingDays >= 3 && Boolean(activePlan?.history_stats?.low_data_warning);
+  const analysisCapital = activePlan?.balance_ngn || balance;
+  const analysisThreshold = analysisCapital * (analysisThresholdPct / 100);
+  const marginalDays = useMemo(
+    () => buildMarginalDays(activePlan?.history_deals || [], analysisThreshold),
+    [activePlan?.history_deals, analysisThreshold]
+  );
+  const { belowCurve, aboveCurve } = useMemo(
+    () => computeMarginalCurves(marginalDays),
+    [marginalDays]
+  );
+  const economicsData = useMemo(
+    () => buildEconomicsData(belowCurve, aboveCurve),
+    [belowCurve, aboveCurve]
+  );
+  const suggestionData = useMemo(
+    () => buildSuggestions(aboveCurve),
+    [aboveCurve]
+  );
+  const thresholdHitDays = marginalDays.filter((day) => day.thresholdHit).length;
+  const totalTradesSampled = Array.isArray(activePlan?.history_deals) ? activePlan.history_deals.length : 0;
+  const analysisDayIndex = selectedAnalysisDay && selectedAnalysisDay <= marginalDays.length
+    ? selectedAnalysisDay
+    : Math.max(marginalDays.length, 1);
+  const analysisDay = marginalDays[analysisDayIndex - 1] || null;
+  const todaySeries = useMemo(() => {
+    if (!analysisDay) return [];
+    let cumPnL = 0;
+    return analysisDay.trades.map((trade) => {
+      cumPnL += trade.pnl;
+      return {
+        label: trade.aboveThreshold ? `+${trade.aboveIndex}` : `T${trade.tradeIndex}`,
+        pnl: trade.pnl,
+        cumPnL,
+        symbol: trade.symbol,
+      };
+    });
+  }, [analysisDay]);
+  const todayVsAverageData = useMemo(() => {
+    if (!analysisDay) return [];
+
+    const merged = [
+      ...belowCurve.map((item) => ({ ...item, zone: 'below' })),
+      ...aboveCurve.map((item) => ({ ...item, zone: 'above' })),
+    ];
+
+    return merged.map((item) => {
+      const todayTrade = analysisDay.trades.find((trade) => (
+        item.zone === 'below'
+          ? !trade.aboveThreshold && trade.tradeIndex === item.posNum
+          : trade.aboveThreshold && trade.aboveIndex === item.posNum
+      ));
+
+      return {
+        position: item.position,
+        mean: Math.round(item.mean),
+        todayPnL: todayTrade ? Math.round(todayTrade.pnl) : null,
+      };
+    });
+  }, [analysisDay, belowCurve, aboveCurve]);
 
   const setOverride = (key, scale = 1) => (event) => {
     const raw = event.target.value;
@@ -262,6 +567,11 @@ export default function TargetPlanner({ settings }) {
   };
 
   const fetchPlan = async () => {
+    if (!hasSelectedSymbol) {
+      setError('Choose a pair from the Scanner tab first.');
+      return;
+    }
+
     if (!hasValidTarget) {
       setError('Target must be greater than your current balance.');
       return;
@@ -277,9 +587,12 @@ export default function TargetPlanner({ settings }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target_ngn: parsedTarget,
-          balance,
+          balance: requestedBalance,
           daily_loss_pct: dailyLossPct,
           risk_pct: riskPct,
+          planning_symbol: selectedSymbol,
+          history_days: historyDays,
+          use_all_history: useAllHistory,
           overrides,
         }),
       });
@@ -305,6 +618,11 @@ export default function TargetPlanner({ settings }) {
   };
 
   const fetchKPI = async () => {
+    if (!hasSelectedSymbol) {
+      setError('Choose a pair from the Scanner tab before loading KPI data.');
+      return;
+    }
+
     if (!hasValidTarget) {
       setError('Enter a target above your current balance before loading KPI data.');
       return;
@@ -315,11 +633,20 @@ export default function TargetPlanner({ settings }) {
 
     try {
       const params = new URLSearchParams({
-        balance: String(balance),
         daily_loss_pct: String(dailyLossPct),
         risk_pct: String(riskPct),
         target_ngn: String(parsedTarget),
+        planning_symbol: selectedSymbol,
       });
+      if (historyDays !== null) {
+        params.set('history_days', String(historyDays));
+      }
+      if (useAllHistory) {
+        params.set('use_all_history', 'true');
+      }
+      if (requestedBalance !== null) {
+        params.set('balance', String(requestedBalance));
+      }
 
       const response = await fetch(`${API}/kpi/today?${params.toString()}`);
       if (!response.ok) {
@@ -342,7 +669,7 @@ export default function TargetPlanner({ settings }) {
   const openPath = () => setSubTab('path');
   const openKpi = () => {
     setSubTab('kpi');
-    if (hasValidTarget) {
+    if (canGeneratePlan) {
       fetchKPI();
     }
   };
@@ -362,12 +689,33 @@ export default function TargetPlanner({ settings }) {
     <div>
       <div style={{ display: 'flex', borderBottom: '1px solid #1e1e1e', marginBottom: 20, gap: 4 }}>
         <button style={subTabStyle(subTab === 'path')} onClick={openPath}>Path</button>
+        <button style={subTabStyle(subTab === 'analysis')} onClick={() => setSubTab('analysis')}>Analysis</button>
         <button style={subTabStyle(subTab === 'kpi')} onClick={openKpi}>Daily KPI</button>
       </div>
 
       {subTab === 'path' && (
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 10px',
+              borderRadius: 999,
+              background: selectedPair ? '#38bdf822' : '#171717',
+              border: `1px solid ${selectedPair ? '#38bdf855' : '#333'}`,
+              marginRight: 4,
+            }}>
+              <span style={{ fontSize: 11, color: '#666' }}>Pair</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: selectedPair ? '#38bdf8' : '#999' }}>
+                {selectedPair?.symbol || 'Choose in Scanner'}
+              </span>
+              {selectedPair && (
+                <span style={{ fontSize: 11, color: '#999' }}>
+                  {selectedPair.classification} · {selectedPair.score}/100
+                </span>
+              )}
+            </div>
             <span style={{ fontSize: 13, color: '#888' }}>Target</span>
             <span style={{ fontSize: 13, color: '#666' }}>NGN</span>
             <input
@@ -391,25 +739,65 @@ export default function TargetPlanner({ settings }) {
             />
             <button
               onClick={fetchPlan}
-              disabled={loading || !hasValidTarget}
+              disabled={loading || !canGeneratePlan}
               style={{
-                background: hasValidTarget ? '#22c55e22' : '#1a1a1a',
-                color: hasValidTarget ? '#22c55e' : '#555',
-                border: `1px solid ${hasValidTarget ? '#22c55e' : '#333'}`,
+                background: canGeneratePlan ? '#22c55e22' : '#1a1a1a',
+                color: canGeneratePlan ? '#22c55e' : '#555',
+                border: `1px solid ${canGeneratePlan ? '#22c55e' : '#333'}`,
                 borderRadius: 6,
                 padding: '7px 20px',
-                cursor: loading || !hasValidTarget ? 'not-allowed' : 'pointer',
+                cursor: loading || !canGeneratePlan ? 'not-allowed' : 'pointer',
                 fontSize: 13,
                 fontWeight: 600,
               }}
             >
               {loading ? 'Planning...' : 'Generate Plan'}
             </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 4 }}>
+              <span style={{ fontSize: 12, color: '#666' }}>History</span>
+              <select
+                value={historyRange}
+                onChange={(event) => {
+                  setHistoryRange(event.target.value);
+                  setPlanData(null);
+                  setKpiData(null);
+                  setError(null);
+                }}
+                style={{
+                  background: '#111',
+                  border: '1px solid #333',
+                  color: '#e0e0e0',
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  fontSize: 13,
+                }}
+              >
+                {HISTORY_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          {!hasValidTarget && targetInput && (
+          {!hasSelectedSymbol && (
+            <div style={{ color: '#f59e0b', fontSize: 12, marginBottom: 14 }}>
+              Choose one scanned pair in the Scanner tab first. That selection is used throughout the Target workflow.
+            </div>
+          )}
+
+          {hasSelectedSymbol && !hasValidTarget && targetInput && (
             <div style={{ color: '#f59e0b', fontSize: 12, marginBottom: 14 }}>
               Enter a target greater than {formatMoney(balance)}.
+            </div>
+          )}
+
+          {settings?.useMt5Balance && (
+            <div style={{ color: '#555', fontSize: 12, marginBottom: 14 }}>
+              {mt5SnapshotBalance !== null
+                ? `Using ${formatBalanceSource(mt5SnapshotSource || balanceSource)} at ${formatMoney(mt5SnapshotBalance)} for current balance checks.`
+                : 'Waiting for a live MT5 balance snapshot. Generate a fresh scan before relying on MT5-based target validation.'}
             </div>
           )}
 
@@ -428,6 +816,12 @@ export default function TargetPlanner({ settings }) {
           {lowData && (
             <div style={{ background: '#1a1200', border: '1px solid #f9731655', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#f97316' }}>
               Only {totalTradingDays} trading days of history are available. Confidence bands are widened to reflect limited data.
+            </div>
+          )}
+
+          {activePlan && totalTradingDays < 20 && !useAllHistory && (
+            <div style={{ background: '#0f1720', border: '1px solid #38bdf844', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#38bdf8' }}>
+              Recent history is thin. Try 180d, 365d, or All to include more MT5 history in the Target plan.
             </div>
           )}
 
@@ -517,14 +911,25 @@ export default function TargetPlanner({ settings }) {
               <div>
                 <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance</div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{formatMoney(activePlan.balance_ngn)}</div>
+                {activePlan.balance_source && (
+                  <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>{formatBalanceSource(activePlan.balance_source)}</div>
+                )}
               </div>
               <div>
                 <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target</div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#22c55e' }}>{formatMoney(activePlan.target_ngn)}</div>
               </div>
               <div>
+                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Window</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{activePlan.history_window_label}</div>
+                <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
+                  {activePlan.history_deals_count} of {activePlan.history_total_deals_count} deal{activePlan.history_total_deals_count === 1 ? '' : 's'} matched this pair
+                </div>
+              </div>
+              <div>
                 <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Days</div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#38bdf8' }}>{totalTradingDays}</div>
+                <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>Trading days found</div>
               </div>
             </div>
           )}
@@ -548,6 +953,199 @@ export default function TargetPlanner({ settings }) {
         </div>
       )}
 
+      {subTab === 'analysis' && (
+        <div>
+          {!activePlan && (
+            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
+              Generate a Target plan first so the analysis tab can inspect the same history window and sampled deals.
+            </div>
+          )}
+
+          {activePlan && (
+            <>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+                {[
+                  ['Window', activePlan.history_window_label, `${totalTradesSampled} deals`],
+                  ['Trading Days', totalTradingDays, 'days found'],
+                  ['Threshold Hit Days', thresholdHitDays, `${marginalDays.length} days sampled`],
+                  ['Analysis Threshold', formatMoney(analysisThreshold), `${analysisThresholdPct.toFixed(1)}% of current capital`],
+                ].map(([label, value, sub]) => (
+                  <div
+                    key={label}
+                    style={{
+                      flex: '1 1 180px',
+                      background: '#111',
+                      border: '1px solid #1e1e1e',
+                      borderRadius: 8,
+                      padding: '12px 14px',
+                    }}
+                  >
+                    <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: '#f0f0f0', marginTop: 6 }}>{value}</div>
+                    <div style={{ fontSize: 11, color: '#555', marginTop: 4 }}>{sub}</div>
+                  </div>
+                ))}
+              </div>
+
+              {economicsData.length === 0 && (
+                <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 30 }}>
+                  Not enough trade-by-trade history in the selected window to build marginal analysis yet.
+                </div>
+              )}
+
+              {economicsData.length > 0 && (
+                <>
+                  <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px', marginBottom: 16 }}>
+                    <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 11, color: '#666' }}>Threshold</span>
+                        <input
+                          type="range"
+                          min={0.5}
+                          max={5}
+                          step={0.1}
+                          value={analysisThresholdPct}
+                          onChange={(event) => setAnalysisThresholdPct(Number(event.target.value))}
+                          style={{ accentColor: '#38bdf8', width: 180 }}
+                        />
+                        <span style={{ fontSize: 12, color: '#38bdf8', minWidth: 120 }}>
+                          {analysisThresholdPct.toFixed(1)}% = {formatMoney(analysisThreshold)}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 11, color: '#666' }}>Day</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={Math.max(marginalDays.length, 1)}
+                          value={analysisDayIndex}
+                          onChange={(event) => setSelectedAnalysisDay(Number(event.target.value))}
+                          style={{ accentColor: '#22c55e', width: 180 }}
+                        />
+                        <span style={{ fontSize: 12, color: '#e0e0e0' }}>
+                          {analysisDay ? `${analysisDay.date} (${analysisDayIndex}/${marginalDays.length})` : 'No day selected'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {analysisDay && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16, marginBottom: 16 }}>
+                      <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px' }}>
+                        <div style={{ fontSize: 12, color: '#aaa', marginBottom: 10 }}>Selected Day Cumulative PnL</div>
+                        <div style={{ height: 260 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <ComposedChart data={todaySeries}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
+                              <XAxis dataKey="label" tick={{ fill: '#666', fontSize: 11 }} />
+                              <YAxis tick={{ fill: '#666', fontSize: 11 }} />
+                              <Tooltip content={<SimpleTooltip />} />
+                              <ReferenceLine y={0} stroke="#555" />
+                              <ReferenceLine y={analysisThreshold} stroke="#f59e0b" strokeDasharray="6 3" />
+                              <Area type="stepAfter" dataKey="cumPnL" name="Cum PnL" stroke="#38bdf8" fill="#38bdf822" strokeWidth={2} />
+                            </ComposedChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+
+                      <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px' }}>
+                        <div style={{ fontSize: 12, color: '#aaa', marginBottom: 10 }}>Selected Day vs Historical Mean by Position</div>
+                        <div style={{ height: 260 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={todayVsAverageData}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
+                              <XAxis dataKey="position" tick={{ fill: '#666', fontSize: 11 }} />
+                              <YAxis tick={{ fill: '#666', fontSize: 11 }} />
+                              <Tooltip content={<SimpleTooltip />} />
+                              <ReferenceLine y={0} stroke="#555" />
+                              <Bar dataKey="mean" name="Mean" fill="#38bdf8" />
+                              <Bar dataKey="todayPnL" name="Selected Day" fill="#f59e0b" />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+                    <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px' }}>
+                      <div style={{ fontSize: 12, color: '#aaa', marginBottom: 10 }}>Marginal Mean by Position</div>
+                      <div style={{ height: 280 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={economicsData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
+                            <XAxis dataKey="position" tick={{ fill: '#666', fontSize: 11 }} />
+                            <YAxis tick={{ fill: '#666', fontSize: 11 }} />
+                            <Tooltip content={<SimpleTooltip />} />
+                            <ReferenceLine y={0} stroke="#555" />
+                            <Bar dataKey="mean" name="Mean PnL" fill="#38bdf8" radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px' }}>
+                      <div style={{ fontSize: 12, color: '#aaa', marginBottom: 10 }}>Opportunity Cost After Threshold</div>
+                      <div style={{ height: 280 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={economicsData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1e1e1e" />
+                            <XAxis dataKey="position" tick={{ fill: '#666', fontSize: 11 }} />
+                            <YAxis tick={{ fill: '#666', fontSize: 11 }} />
+                            <Tooltip content={<SimpleTooltip />} />
+                            <ReferenceLine y={0} stroke="#555" />
+                            <Line type="monotone" dataKey="marginalCost" name="Marginal Cost" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
+                            <Line type="monotone" dataKey="averageCost" name="Average Cost" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '14px', marginTop: 16 }}>
+                    <div style={{ fontSize: 12, color: '#aaa', marginBottom: 10 }}>Position Suggestions</div>
+                    {suggestionData.length === 0 && (
+                      <div style={{ color: '#555', fontSize: 12 }}>No above-threshold positions were observed in this history window.</div>
+                    )}
+                    {suggestionData.length > 0 && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {suggestionData.map((item) => (
+                          <div
+                            key={item.position}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 12,
+                              flexWrap: 'wrap',
+                              padding: '10px 12px',
+                              border: '1px solid #1e1e1e',
+                              borderRadius: 8,
+                              background: item.eligible ? '#0d2e1a' : '#171717',
+                            }}
+                          >
+                            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                              <div style={{ fontWeight: 700, color: '#f0f0f0' }}>{item.position}</div>
+                              <div style={{ fontSize: 12, color: '#999' }}>Mean {formatMoney(item.mean)}</div>
+                              <div style={{ fontSize: 12, color: '#999' }}>CV {item.cv}%</div>
+                              <div style={{ fontSize: 12, color: '#999' }}>{item.samples} samples</div>
+                              <div style={{ fontSize: 12, color: '#999' }}>Locked profit avg {formatMoney(item.avgLockedProfit)}</div>
+                            </div>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: item.eligible ? '#22c55e' : '#f59e0b' }}>
+                              {item.eligible ? 'Stable positive edge' : 'Not stable enough yet'}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {subTab === 'kpi' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -556,14 +1154,14 @@ export default function TargetPlanner({ settings }) {
             </span>
             <button
               onClick={fetchKPI}
-              disabled={kpiLoading || !hasValidTarget}
+              disabled={kpiLoading || !canGeneratePlan}
               style={{
                 background: '#1e1e1e',
-                color: hasValidTarget ? '#e0e0e0' : '#555',
+                color: canGeneratePlan ? '#e0e0e0' : '#555',
                 border: '1px solid #333',
                 borderRadius: 6,
                 padding: '5px 14px',
-                cursor: kpiLoading || !hasValidTarget ? 'not-allowed' : 'pointer',
+                cursor: kpiLoading || !canGeneratePlan ? 'not-allowed' : 'pointer',
                 fontSize: 11,
               }}
             >
@@ -573,19 +1171,25 @@ export default function TargetPlanner({ settings }) {
 
           {error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 12 }}>{error}</div>}
 
-          {!hasValidTarget && (
+          {!hasSelectedSymbol && (
+            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
+              Select a pair in the Scanner tab before loading KPI data.
+            </div>
+          )}
+
+          {hasSelectedSymbol && !hasValidTarget && (
             <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
               Enter a target above your current balance in the Path tab before loading KPI data.
             </div>
           )}
 
-          {hasValidTarget && !kpiLoading && !kpiData && (
+          {canGeneratePlan && !kpiLoading && !kpiData && (
             <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
               Open the Path tab to generate a plan, or refresh here to load today&apos;s KPI snapshot for the current target.
             </div>
           )}
 
-          {hasValidTarget && !kpiLoading && kpiData && !kpiData.current_milestone && (
+          {canGeneratePlan && !kpiLoading && kpiData && !kpiData.current_milestone && (
             <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
               No active milestone is available for this target yet.
             </div>
@@ -626,6 +1230,10 @@ export default function TargetPlanner({ settings }) {
                   <div>
                     <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Planner Pair</div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{kpiData.planning_symbol}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Window</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{kpiData.history_window_label}</div>
                   </div>
                   <div>
                     <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Milestone Range</div>
