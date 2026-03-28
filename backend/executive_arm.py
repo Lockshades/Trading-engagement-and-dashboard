@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 
 class EnforcementSettings(BaseModel):
     """Main enforcement configuration"""
+    # Account Validation
+    tracked_account_login: Optional[int] = Field(
+        default=None,
+        description="MT5 account login number that this controller should manage"
+    )
+    account_validation_enabled: bool = Field(
+        default=True,
+        description="Enable account validation handshake"
+    )
+    
     # Lot Size Enforcement
     max_lot_per_symbol: dict[str, float] = Field(
         default_factory=dict,
@@ -217,6 +227,41 @@ class ExecutiveArmController:
         self.settings.max_lot_per_symbol[symbol] = max_lot
         self._cached_settings = None  # Invalidate cache
         logger.info(f"Set lot limit for {symbol}: {max_lot}")
+    
+    # -------------------------------------------------------------------------
+    # ACCOUNT VALIDATION / HANDSHAKE
+    # -------------------------------------------------------------------------
+    
+    def set_tracked_account(self, login: int) -> None:
+        """Set the MT5 account login that this controller manages"""
+        self.settings.tracked_account_login = login
+        self._cached_settings = None
+        logger.info(f"Controller tracking account login: {login}")
+    
+    def validate_account(self, ea_status: dict) -> tuple[bool, str]:
+        """
+        Validate that the EA is connected to the correct account.
+        Returns (is_valid, reason).
+        """
+        if not self.settings.account_validation_enabled:
+            return True, "Account validation disabled"
+        
+        tracked_login = self.settings.tracked_account_login
+        if tracked_login is None:
+            return True, "No tracked account configured"
+        
+        ea_account = ea_status.get("account")
+        if ea_account is None:
+            return False, "No account info in heartbeat"
+        
+        ea_login = ea_account.get("login")
+        if ea_login is None:
+            return False, "No login in account info"
+        
+        if ea_login != tracked_login:
+            return False, f"Account mismatch: EA on {ea_login}, controller expects {tracked_login}"
+        
+        return True, f"Account validated: {tracked_login}"
     
     # -------------------------------------------------------------------------
     # LOT SIZE ENFORCEMENT
@@ -467,9 +512,22 @@ class ExecutiveArmController:
     
     def handle_heartbeat(self, ea_status: dict) -> dict:
         """
-        Process heartbeat from MT5 EA.
+        Process heartbeat from MT5 EA with account validation.
         ea_status should contain: version, account, positions, errors
         """
+        # Validate account first
+        is_valid, reason = self.validate_account(ea_status)
+        if not is_valid:
+            self._log_action("ACCOUNT_MISMATCH", None, {
+                "reason": reason,
+                "ea_status": ea_status.get("account", {})
+            })
+            return {
+                "error": "ACCOUNT_MISMATCH",
+                "reason": reason,
+                "status": "ERROR"
+            }
+        
         self._last_heartbeat = datetime.now(timezone.utc)
         
         # Log any errors from EA

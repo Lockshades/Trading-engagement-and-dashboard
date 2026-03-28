@@ -305,5 +305,128 @@ class TestEnforcementSettings:
         assert settings.enforcement_mode == "SOFT"
 
 
+class TestAccountValidation:
+    """Test account validation / handshake logic"""
+    
+    def test_set_tracked_account(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        assert controller.settings.tracked_account_login == 123456
+    
+    def test_validate_account_success_when_matching(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {
+            "account": {"login": 123456},
+            "symbol": "BTCUSDm"
+        }
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is True
+        assert "123456" in reason
+    
+    def test_validate_account_fails_when_mismatch(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {
+            "account": {"login": 999999},
+            "symbol": "BTCUSDm"
+        }
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is False
+        assert "mismatch" in reason.lower()
+    
+    def test_validate_account_fails_when_no_account_info(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {"symbol": "BTCUSDm"}  # No account field
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is False
+        assert "No account info" in reason
+    
+    def test_validate_account_fails_when_no_login(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {
+            "account": {"balance": 10000.0},  # No login field
+            "symbol": "BTCUSDm"
+        }
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is False
+        assert "No login" in reason
+    
+    def test_validate_account_passes_when_no_tracked_account(self):
+        controller = create_default_controller()
+        # No tracked account set
+        
+        ea_status = {
+            "account": {"login": 123456},
+            "symbol": "BTCUSDm"
+        }
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is True
+    
+    def test_validate_account_passes_when_validation_disabled(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        controller.settings.account_validation_enabled = False
+        
+        ea_status = {
+            "account": {"login": 999999},  # Different account
+            "symbol": "BTCUSDm"
+        }
+        
+        is_valid, reason = controller.validate_account(ea_status)
+        
+        assert is_valid is True
+        assert "disabled" in reason.lower()
+    
+    def test_handle_heartbeat_returns_error_on_account_mismatch(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {
+            "account": {"login": 999999},
+            "symbol": "BTCUSDm",
+            "positions": [],
+            "errors": []
+        }
+        
+        result = controller.handle_heartbeat(ea_status)
+        
+        assert "error" in result
+        assert result["error"] == "ACCOUNT_MISMATCH"
+    
+    def test_handle_heartbeat_returns_settings_on_valid_account(self):
+        controller = create_default_controller()
+        controller.set_tracked_account(123456)
+        
+        ea_status = {
+            "account": {"login": 123456},
+            "symbol": "BTCUSDm",
+            "positions": [],
+            "errors": []
+        }
+        
+        result = controller.handle_heartbeat(ea_status)
+        
+        assert "settings" in result
+        assert result["status"] == "ACTIVE"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
