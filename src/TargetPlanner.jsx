@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import {
   ResponsiveContainer,
   CartesianGrid,
@@ -39,6 +39,24 @@ const HISTORY_OPTIONS = [
   { value: '365', label: '365d' },
   { value: 'all', label: 'All' },
 ];
+
+// Persist / load target planner state
+const PLANNER_STORAGE_KEY = 'targetPlannerState';
+
+function loadPlannerState() {
+  try {
+    const raw = localStorage.getItem(PLANNER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function savePlannerState(state) {
+  try {
+    localStorage.setItem(PLANNER_STORAGE_KEY, JSON.stringify(state));
+  } catch {}
+}
 
 function average(values) {
   if (!values.length) return 0;
@@ -577,6 +595,28 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
   const [error, setError] = useState(null);
   const [overrides, setOverrides] = useState({});
   const [showOverrides, setShowOverrides] = useState(false);
+
+  // Load persisted state on mount
+  useEffect(() => {
+    const saved = loadPlannerState();
+    if (saved) {
+      if (saved.subTab) setSubTab(saved.subTab);
+      if (saved.targetInput) setTargetInput(saved.targetInput);
+      if (saved.historyRange) setHistoryRange(saved.historyRange);
+      if (saved.overrides) setOverrides(saved.overrides);
+    }
+  }, []);
+
+  // Persist state when it changes
+  useEffect(() => {
+    const stateToSave = {
+      subTab,
+      targetInput,
+      historyRange,
+      overrides,
+    };
+    savePlannerState(stateToSave);
+  }, [subTab, targetInput, historyRange, overrides]);
 
   const fallbackBalance = Number(settings?.balance || 150000);
   const requestedBalance = settings?.useMt5Balance ? null : fallbackBalance;

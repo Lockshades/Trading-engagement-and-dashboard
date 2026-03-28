@@ -32,10 +32,12 @@ This document tracks the development progress toward production readiness. All f
 
 | Feature | Classifications | Status | Notes |
 |---------|-----------------|--------|-------|
-| Executive Arm - Lot Size Cap | Core, Risk Management, Novel | In Progress | Enforce max lot per symbol from daily KPI |
-| Executive Arm - Auto-Close | Core, Risk Management, Novel | In Progress | Auto-close at +10% buffer |
-| Sleep/Gap Protection | Core, Risk Management, Novel | P0 | Prevent account destruction from weekend gaps |
-| Multi-Account Sync | Core, Backend, Novel | P0 | PROP firm multi-account management |
+| Executive Arm - Lot Size Cap | Core, Risk Management, Novel | Done | Enforce max lot per symbol from daily KPI |
+| Executive Arm - Auto-Close | Core, Risk Management, Novel | Done | Auto-close at +10% buffer |
+| Milestone Setback Logic | Core, Backend | Done | Better cashflow classification for milestone tracking |
+| State Persistence | UX | Done | localStorage persistence for Target Planner |
+| Sleep/Gap Protection | Core, Risk Management, Novel | In Progress | Prevent account destruction from weekend gaps |
+| Multi-Account Sync | Core, Backend, Novel | Pending | PROP firm multi-account management |
 
 ### Backlog - TIER 2
 

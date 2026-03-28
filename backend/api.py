@@ -98,6 +98,29 @@ EXTERNAL_CASHFLOW_TYPES = {
 }
 EXTERNAL_CASHFLOW_TYPES.discard(None)
 
+# Cash flow classifications for milestone tracking
+# DEPOSIT_TYPES: Add to capital base (advances progress)
+DEPOSIT_TYPES = {
+    getattr(mt5, "DEAL_TYPE_BALANCE", None),
+    getattr(mt5, "DEAL_TYPE_CREDIT", None),
+    getattr(mt5, "DEAL_TYPE_BONUS", None),
+}
+DEPOSIT_TYPES.discard(None)
+
+# CHARGE_TYPES: Subtract from capital base (causes setback)
+CHARGE_TYPES = {
+    getattr(mt5, "DEAL_TYPE_CHARGE", None),
+    getattr(mt5, "DEAL_TYPE_CORRECTION", None),
+}
+CHARGE_TYPES.discard(None)
+
+# WITHDRAWAL_TYPES: Subtract from capital but don't cause milestone setback
+# (User withdrew profit, not capital base)
+WITHDRAWAL_TYPES = {
+    getattr(mt5, "DEAL_TYPE_WITHDRAWAL", None),
+}
+WITHDRAWAL_TYPES.discard(None)
+
 
 class ScanRequest(BaseModel):
     balance: Optional[float] = Field(default=None, gt=0, description="Account balance, must be positive if provided")
@@ -415,11 +438,21 @@ def normalize_external_cash_flow(raw_deal) -> Optional[dict]:
     if deal_type not in EXTERNAL_CASHFLOW_TYPES or timestamp is None or amount is None:
         return None
 
+    # Classify the cash flow type
+    flow_category = "UNKNOWN"
+    if deal_type in DEPOSIT_TYPES:
+        flow_category = "DEPOSIT"
+    elif deal_type in CHARGE_TYPES:
+        flow_category = "CHARGE"
+    elif deal_type in WITHDRAWAL_TYPES:
+        flow_category = "WITHDRAWAL"
+
     try:
         return {
             "time": int(timestamp),
             "amount": float(amount),
             "type": int(deal_type),
+            "category": flow_category,
             "comment": str(deal.get("comment") or ""),
         }
     except (TypeError, ValueError):
@@ -620,7 +653,15 @@ def kpi_today(
         external_cash_flows = get_external_cash_flows(history_start, now_utc)
         history_deals = [deal for deal in all_history_deals if deal.get("symbol") == active_symbol]
         history_stats = analyze_history(history_deals)
-        net_external_funding = sum(flow["amount"] for flow in external_cash_flows)
+
+        # Classify cash flows for milestone tracking
+        # DEPOSITS: Add to capital base (advances progress)
+        # CHARGES: Subtract from capital base (causes milestone setback)
+        # WITHDRAWALS: Don't affect milestone position (profit taken out)
+        deposits = sum(flow["amount"] for flow in external_cash_flows if flow.get("category") == "DEPOSIT" and flow["amount"] > 0)
+        charges = sum(abs(flow["amount"]) for flow in external_cash_flows if flow.get("category") == "CHARGE")
+        # net_external_funding represents net capital added (deposits - charges)
+        net_external_funding = deposits - charges
         progress_balance = max(resolved_balance - net_external_funding, 0.0)
 
         milestones = []
@@ -701,6 +742,8 @@ def kpi_today(
             "balance_ngn": resolved_balance,
             "progress_balance_ngn": round(progress_balance, 2),
             "net_external_funding_ngn": round(net_external_funding, 2),
+            "deposits_ngn": round(deposits, 2),
+            "charges_ngn": round(charges, 2),
             "balance_source": balance_source,
             "account_snapshot": account_snapshot,
             "history_window_days": history_window_days,
