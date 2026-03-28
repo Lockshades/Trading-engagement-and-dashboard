@@ -22,6 +22,16 @@ from target_planner import (
     get_kpi_today,
     get_open_position_alignment,
 )
+from executive_arm import (
+    ExecutiveArmController,
+    create_default_controller,
+    get_controller,
+    enforce_lot,
+    check_close,
+    get_settings,
+    PositionInfo,
+    EnforcementSettings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -756,6 +766,124 @@ def marginal(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# =============================================================================
+# Executive Arm API Endpoints
+# =============================================================================
+
+@app.get("/executive/settings")
+def executive_settings(symbol: str = "BTCUSDm"):
+    """
+    Get current enforcement settings for a symbol.
+    MT5 EA polls this endpoint to get lot limits and rules.
+    """
+    return get_settings(symbol)
+
+
+@app.post("/executive/heartbeat")
+def executive_heartbeat(ea_status: dict):
+    """
+    Receive heartbeat from MT5 EA.
+    ea_status should contain: version, account, positions, errors
+    """
+    return get_controller().handle_heartbeat(ea_status)
+
+
+@app.get("/executive/status")
+def executive_status():
+    """Get Executive Arm system status."""
+    return get_controller().get_status()
+
+
+@app.get("/executive/actions")
+def executive_actions(limit: int = 50):
+    """Get recent enforcement actions."""
+    return {"actions": get_controller().get_action_history(limit)}
+
+
+@app.post("/executive/enforce")
+def executive_enforce(symbol: str, lot: float):
+    """
+    Check if a lot size is allowed.
+    Used by MT5 EA before opening a position.
+    """
+    result = enforce_lot(symbol, lot)
+    return {
+        "allowed": result.allowed,
+        "action": result.action,
+        "reason": result.reason,
+        "requested_lot": result.requested_lot,
+        "max_lot": result.max_lot,
+        "suggested_lot": result.suggested_lot,
+    }
+
+
+@app.post("/executive/check-close")
+def executive_check_close(profit: float, positions: list[dict]):
+    """
+    Check if auto-close should be triggered.
+    Called periodically by MT5 EA to monitor profit.
+    """
+    # Convert dict positions to PositionInfo objects
+    pos_objects = [PositionInfo(**p) for p in positions]
+    result = check_close(profit, pos_objects)
+    return {
+        "should_monitor": result.should_monitor,
+        "should_close": result.should_close,
+        "action": result.action,
+        "reason": result.reason,
+        "current_profit": result.current_profit,
+        "target": result.target,
+        "buffer_percent": result.buffer_percent,
+    }
+
+
+@app.post("/executive/configure")
+def executive_configure(config: dict):
+    """
+    Update Executive Arm settings.
+    Body should contain enforcement configuration.
+    """
+    controller = get_controller()
+    
+    # Parse settings from dict
+    settings = EnforcementSettings(
+        max_lot_per_symbol=config.get("max_lot_per_symbol", {}),
+        default_max_lot=config.get("default_max_lot", 0.1),
+        daily_profit_target=config.get("daily_profit_target", 0.0),
+        points_budget=config.get("points_budget", 0.0),
+        use_lot_normalizer=config.get("use_lot_normalizer", True),
+        auto_close_buffer=config.get("auto_close_buffer", 1.10),
+        auto_close_threshold=config.get("auto_close_threshold", 1.05),
+        min_hold_seconds=config.get("min_hold_seconds", 300),
+        enforcement_mode=config.get("enforcement_mode", "HARD"),
+        emergency_override_password=config.get("emergency_override_password", ""),
+    )
+    
+    controller.update_settings(settings)
+    
+    return {
+        "status": "configured",
+        "mode": settings.enforcement_mode,
+        "daily_target": settings.daily_profit_target,
+    }
+
+
+@app.post("/executive/set-lot-limit")
+def executive_set_lot_limit(symbol: str, max_lot: float):
+    """Set max lot for a specific symbol."""
+    controller = get_controller()
+    controller.set_symbol_lot_limit(symbol, max_lot)
+    return {"status": "updated", "symbol": symbol, "max_lot": max_lot}
+
+
+@app.post("/executive/reset")
+def executive_reset():
+    """Reset daily limits (for day boundary)."""
+    controller = get_controller()
+    controller.reset_daily_limits()
+    return {"status": "reset", "message": "Daily limits have been reset"}
 
 
 # =============================================================================
