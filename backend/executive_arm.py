@@ -347,7 +347,7 @@ class ExecutiveArmController:
     ) -> AutoCloseResult:
         """
         Check if auto-close should be triggered.
-        Monitors profit and auto-closes if it was above buffer but dropped.
+        Monitors profit and auto-closes if it was above buffer but dropped below threshold.
         """
         target = self.settings.daily_profit_target
         buffer = self.settings.auto_close_buffer
@@ -366,23 +366,14 @@ class ExecutiveArmController:
         
         buffer_percent = (current_profit / target - 1) * 100 if target > 0 else 0
         
-        # Check if we should enter monitoring zone
-        if current_profit >= buffer_level:
-            if self._monitoring_since is None:
-                self._monitoring_since = datetime.now(timezone.utc)
-                self._log_action("MONITOR_ENTER", None, {
-                    "profit": current_profit,
-                    "target": target,
-                    "buffer_percent": buffer_percent
-                })
-            
-            # Check minimum hold time
-            if self._monitoring_since:
+        # If currently monitoring or just entered
+        if self._monitoring_since is not None:
+            # We're in monitoring - check if we should close
+            if current_profit < threshold_level:
                 time_in_monitor = (datetime.now(timezone.utc) - self._monitoring_since).seconds
                 min_hold = self.settings.min_hold_seconds
                 
-                # Check if we should trigger close
-                if current_profit < threshold_level and time_in_monitor >= min_hold:
+                if time_in_monitor >= min_hold:
                     self._log_action("AUTO_CLOSE", None, {
                         "profit_at_close": current_profit,
                         "target": target,
@@ -391,7 +382,7 @@ class ExecutiveArmController:
                     })
                     self._monitoring_since = None  # Reset
                     return AutoCloseResult(
-                        should_monitor=True,
+                        should_monitor=False,
                         should_close=True,
                         action="CLOSE_ALL",
                         reason=f"Profit dropped below {threshold*100}% of target",
@@ -399,26 +390,62 @@ class ExecutiveArmController:
                         target=target,
                         buffer_percent=buffer_percent
                     )
-                
-                return AutoCloseResult(
-                    should_monitor=True,
-                    should_close=False,
-                    action="MONITOR",
-                    reason=f"In monitoring zone - holding (min {min_hold}s)",
-                    current_profit=current_profit,
-                    target=target,
-                    buffer_percent=buffer_percent
-                )
+                else:
+                    # Still in min hold period
+                    return AutoCloseResult(
+                        should_monitor=True,
+                        should_close=False,
+                        action="MONITOR",
+                        reason=f"In monitoring zone - holding (min {min_hold}s, elapsed {time_in_monitor}s)",
+                        current_profit=current_profit,
+                        target=target,
+                        buffer_percent=buffer_percent
+                    )
+            else:
+                # Profit is above threshold - remain in monitoring if above buffer, else check exit
+                if current_profit >= buffer_level:
+                    # Still above buffer - normal monitoring
+                    return AutoCloseResult(
+                        should_monitor=True,
+                        should_close=False,
+                        action="MONITOR",
+                        reason="In monitoring zone - profit above buffer",
+                        current_profit=current_profit,
+                        target=target,
+                        buffer_percent=buffer_percent
+                    )
+                else:
+                    # Between buffer and threshold - remains in monitoring
+                    return AutoCloseResult(
+                        should_monitor=True,
+                        should_close=False,
+                        action="MONITOR",
+                        reason="In monitoring zone - profit between buffer and threshold",
+                        current_profit=current_profit,
+                        target=target,
+                        buffer_percent=buffer_percent
+                    )
         
-        # Not in monitoring zone
-        if self._monitoring_since is not None and current_profit >= threshold_level:
-            # Recovered back above threshold - exit monitoring
-            self._log_action("MONITOR_EXIT", None, {
+        # Not currently monitoring - check if we should enter
+        if current_profit >= buffer_level:
+            self._monitoring_since = datetime.now(timezone.utc)
+            self._log_action("MONITOR_ENTER", None, {
                 "profit": current_profit,
-                "target": target
+                "target": target,
+                "buffer_percent": buffer_percent
             })
-            self._monitoring_since = None
+            
+            return AutoCloseResult(
+                should_monitor=True,
+                should_close=False,
+                action="MONITOR",
+                reason="Entered monitoring zone - above buffer",
+                current_profit=current_profit,
+                target=target,
+                buffer_percent=buffer_percent
+            )
         
+        # Normal operation - no monitoring needed
         return AutoCloseResult(
             should_monitor=False,
             should_close=False,
