@@ -9,19 +9,29 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "python -m pytest -q"
+    "test": "jest",
+    "test:run": "jest --passWithNoTests",
+    "test:python": "python -m pytest -q"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "recharts": "^3.8.0"
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "recharts": "3.8.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^6.0.1",
-    "vite": "^8.0.1"
+    "@babel/preset-env": "^7.29.2",
+    "@babel/preset-react": "^7.28.5",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@vitejs/plugin-react": "6.0.1",
+    "babel-jest": "^30.3.0",
+    "jest": "^30.3.0",
+    "jest-environment-jsdom": "^30.3.0",
+    "jsdom": "^29.0.1",
+    "vite": "8.0.1"
   }
 }

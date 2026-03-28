@@ -30,11 +30,35 @@ def stub_mt5_ok(monkeypatch):
     monkeypatch.setattr(api.mt5, "initialize", lambda: True)
     monkeypatch.setattr(api.mt5, "shutdown", lambda: None)
     monkeypatch.setattr(api.mt5, "last_error", lambda: (0, "ok"))
+    monkeypatch.setattr(api.mt5, "positions_get", lambda symbol=None: [])
+    monkeypatch.setattr(api.mt5, "history_deals_get", lambda date_from, date_to: [])
     monkeypatch.setattr(
         api.mt5,
         "account_info",
         lambda: SimpleNamespace(balance=200_000, equity=210_000, margin_free=180_000, currency="NGN", login=12345),
     )
+
+
+def make_pair_info(symbol: str, asset_class: str | None = None, **overrides):
+    point = overrides.get("point", 0.01)
+    trade_tick_value = overrides.get("trade_tick_value", 160.0)
+    trade_tick_size = overrides.get("trade_tick_size", point)
+    digits = overrides.get("digits", 2)
+    pair_info = {
+        "symbol": symbol,
+        "asset_class": asset_class,
+        "volume_min": 0.1,
+        "volume_step": 0.1,
+        "volume_max": 100.0,
+        "trade_tick_value": trade_tick_value,
+        "trade_tick_size": trade_tick_size,
+        "point": point,
+        "digits": digits,
+        "atr": 15.0,
+        **api.build_move_unit(symbol, asset_class, point, digits, trade_tick_value, trade_tick_size),
+    }
+    pair_info.update(overrides)
+    return pair_info
 
 
 def test_resolve_balance_prefers_explicit_value(monkeypatch):
@@ -103,6 +127,20 @@ def test_resolve_planning_symbol_prefers_user_selected_scanned_pair():
     assert symbol == "ETHUSDm"
 
 
+def test_build_move_unit_uses_pips_for_forex():
+    unit = api.build_move_unit("EURUSDm", "forex", 0.00001, 5, 1.0, 0.00001)
+    assert unit["move_unit_label"] == "Pips"
+    assert unit["move_unit_short"] == "pip"
+    assert unit["move_unit_size"] == pytest.approx(0.0001)
+
+
+def test_build_move_unit_uses_points_for_crypto():
+    unit = api.build_move_unit("BTCUSDm", "crypto", 0.01, 2, 160.0, 0.01)
+    assert unit["move_unit_label"] == "Points"
+    assert unit["move_unit_short"] == "pt"
+    assert unit["move_value_ngn_per_lot"] == pytest.approx(160.0)
+
+
 def test_sanitize_overrides_keeps_only_supported_numeric_values():
     clean = api.sanitize_overrides({
         "win_rate": "0.65",
@@ -159,15 +197,7 @@ def test_plan_endpoint_returns_empty_milestones_when_target_not_above_balance(st
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
 
     status, body = request_json("POST", "/plan", {
@@ -189,15 +219,7 @@ def test_plan_endpoint_sanitizes_overrides_before_milestone_compute(stub_mt5_ok,
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
     monkeypatch.setattr(api, "analyze_history", lambda deals: {
         "win_rate": 0.6,
@@ -242,15 +264,7 @@ def test_plan_endpoint_uses_requested_history_window(stub_mt5_ok, monkeypatch):
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
 
     def fake_history(date_from, date_to):
         captured["days"] = round((date_to - date_from).total_seconds() / 86400)
@@ -278,15 +292,7 @@ def test_plan_endpoint_supports_all_history_mode(stub_mt5_ok, monkeypatch):
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
 
     def fake_history(date_from, date_to):
         captured["date_from"] = date_from
@@ -313,15 +319,7 @@ def test_plan_endpoint_uses_requested_symbol_and_filters_deals(stub_mt5_ok, monk
         {"symbol": "EURGBPm", "classification": "SAFE", "score": 88},
         {"symbol": "BTCUSDm", "classification": "MODERATE", "score": 76},
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [
         {"symbol": "BTCUSDm", "profit": 100.0, "volume": 0.01, "time": 1},
         {"symbol": "BTCUSDm", "profit": 200.0, "volume": 0.01, "time": 2},
@@ -341,21 +339,14 @@ def test_plan_endpoint_uses_requested_symbol_and_filters_deals(stub_mt5_ok, monk
     assert body["history_deals_count"] == 0
     assert body["history_total_deals_count"] == 3
     assert body["history_deals"] == []
+    assert body["pair_info"]["move_unit_label"] == "Pips"
 
 
 def test_kpi_endpoint_returns_empty_payload_without_active_milestone(stub_mt5_ok, monkeypatch):
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
 
     status, body = request_json("GET", "/kpi/today?balance=150000&daily_loss_pct=0.02&risk_pct=0.01&target_ngn=100000")
@@ -364,21 +355,13 @@ def test_kpi_endpoint_returns_empty_payload_without_active_milestone(stub_mt5_ok
     assert body["kpi"] == {}
 
 
-def test_kpi_endpoint_passes_current_lot_pip_value_to_kpi_math(stub_mt5_ok, monkeypatch):
+def test_kpi_endpoint_passes_current_lot_move_value_to_kpi_math(stub_mt5_ok, monkeypatch):
     captured = {}
 
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
     monkeypatch.setattr(api, "analyze_history", lambda deals: {
         "win_rate": 0.6,
@@ -400,23 +383,148 @@ def test_kpi_endpoint_passes_current_lot_pip_value_to_kpi_math(stub_mt5_ok, monk
             "capital_end": target,
             "lot_size": 0.2,
             "daily_target_ngn": 2000,
+            "daily_target_units": 12.5,
             "daily_target_pips": 12.5,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
             "min_trades_per_day": 2,
             "max_trades_per_day": 4,
         }
     ])
 
-    def fake_get_kpi_today(deals_today, milestone, pip_value_ngn, balance, daily_loss_pct):
-        captured["pip_value_ngn"] = pip_value_ngn
+    def fake_get_kpi_today(deals_today, milestone, move_value_ngn, balance, daily_loss_pct, daily_limit_balance=None):
+        captured["move_value_ngn"] = move_value_ngn
         return {"status": "ON_TRACK", "actual_ngn": 0, "target_ngn": milestone["daily_target_ngn"]}
 
     monkeypatch.setattr(api, "get_kpi_today", fake_get_kpi_today)
 
     status, body = request_json("GET", "/kpi/today?balance=150000&planning_symbol=ETHUSDm&daily_loss_pct=0.02&risk_pct=0.01&target_ngn=300000")
     assert status == 200
-    assert captured["pip_value_ngn"] == 3200.0
+    assert captured["move_value_ngn"] == 32.0
     assert body["planning_symbol"] == "ETHUSDm"
     assert body["kpi"]["status"] == "ON_TRACK"
+
+
+def test_kpi_endpoint_returns_open_position_alignment(stub_mt5_ok, monkeypatch):
+    monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
+        {"symbol": "BTCUSDm", "classification": "SAFE", "score": 88, "asset_class": "crypto"}
+    ])
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(
+        symbol,
+        asset_class,
+        volume_min=0.01,
+        volume_step=0.01,
+        trade_tick_value=1000.0,
+    ))
+    monkeypatch.setattr(api, "analyze_history", lambda deals: {
+        "win_rate": 0.6,
+        "avg_win_ngn": 3000.0,
+        "avg_loss_ngn": 1500.0,
+        "std_win": 500.0,
+        "std_loss": 400.0,
+        "avg_trades_per_day": 3.0,
+        "marginal_cutoff": 4,
+        "max_consecutive_losses": 2,
+        "total_trading_days": 20,
+        "low_data_warning": False,
+        "data_quality": "MEDIUM",
+        "no_history": False,
+    })
+    monkeypatch.setattr(api, "compute_milestones", lambda balance, target, stats, pair_info, overrides, risk_pct, daily_loss_pct: [
+        {
+            "capital_start": balance,
+            "capital_end": target,
+            "lot_size": 0.1,
+            "daily_target_ngn": 2000,
+            "daily_target_units": 20.0,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
+            "min_trades_per_day": 2,
+            "max_trades_per_day": 4,
+        }
+    ])
+    monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
+    monkeypatch.setattr(
+        api.mt5,
+        "positions_get",
+        lambda symbol=None: [
+            {
+                "ticket": 777,
+                "symbol": "BTCUSDm",
+                "type": 0,
+                "volume": 0.1,
+                "profit": 500.0,
+                "price_open": 65000.0,
+                "price_current": 65050.0,
+                "sl": 0.0,
+                "tp": 0.0,
+                "time": 123,
+            }
+        ],
+    )
+
+    status, body = request_json("GET", "/kpi/today?balance=150000&planning_symbol=BTCUSDm&daily_loss_pct=0.02&risk_pct=0.01&target_ngn=300000")
+    assert status == 200
+    assert body["kpi"]["closed_trades_taken"] == 0
+    assert body["kpi"]["open_positions_count"] == 1
+    assert body["kpi"]["active_trades_taken"] == 1
+    assert body["kpi"]["trades_remaining_including_open"] == 3
+    assert body["open_position_alignment"]["positions_count"] == 1
+    assert body["open_position_alignment"]["matching_positions_count"] == 1
+    assert body["open_position_alignment"]["planned_trade_slots"] == 2
+    assert body["open_position_alignment"]["recommended_lot"] == 0.1
+    assert body["open_position_alignment"]["target_ngn_per_trade"] == 1000.0
+    assert body["open_position_alignment"]["positions"][0]["ticket"] == 777
+    assert body["open_position_alignment"]["positions"][0]["settings_status"] == "MATCH"
+    assert body["open_position_alignment"]["move_unit_label"] == "Points"
+
+
+def test_kpi_endpoint_uses_funding_adjusted_progress_balance_for_milestones(stub_mt5_ok, monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
+        {"symbol": "BTCUSDm", "classification": "SAFE", "score": 88, "asset_class": "crypto"}
+    ])
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
+    monkeypatch.setattr(api, "analyze_history", lambda deals: {
+        "win_rate": 0.6,
+        "avg_win_ngn": 3000.0,
+        "avg_loss_ngn": 1500.0,
+        "std_win": 500.0,
+        "std_loss": 400.0,
+        "avg_trades_per_day": 3.0,
+        "marginal_cutoff": 4,
+        "max_consecutive_losses": 2,
+        "total_trading_days": 20,
+        "low_data_warning": False,
+        "data_quality": "MEDIUM",
+        "no_history": False,
+    })
+    monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
+    monkeypatch.setattr(api, "get_external_cash_flows", lambda date_from, date_to: [{"amount": 100_000.0}])
+
+    def fake_compute(balance, target, stats, pair_info, overrides, risk_pct, daily_loss_pct):
+        captured["balance"] = balance
+        return [{
+            "capital_start": balance,
+            "capital_end": target,
+            "lot_size": 0.1,
+            "daily_target_ngn": 2000,
+            "daily_target_units": 20.0,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
+            "min_trades_per_day": 2,
+            "max_trades_per_day": 4,
+        }]
+
+    monkeypatch.setattr(api, "compute_milestones", fake_compute)
+    monkeypatch.setattr(api, "get_kpi_today", lambda deals_today, milestone, move_value_ngn, balance, daily_loss_pct, daily_limit_balance=None: {"status": "ON_TRACK"})
+
+    status, body = request_json("GET", "/kpi/today?balance=150000&planning_symbol=BTCUSDm&daily_loss_pct=0.02&risk_pct=0.01&target_ngn=300000")
+    assert status == 200
+    assert captured["balance"] == 50_000
+    assert body["progress_balance_ngn"] == 50_000
+    assert body["net_external_funding_ngn"] == 100_000
 
 
 def test_kpi_endpoint_uses_requested_history_window(stub_mt5_ok, monkeypatch):
@@ -425,15 +533,7 @@ def test_kpi_endpoint_uses_requested_history_window(stub_mt5_ok, monkeypatch):
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "ETHUSDm", "classification": "SAFE", "score": 88}
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol,
-        "volume_min": 0.1,
-        "volume_step": 0.1,
-        "volume_max": 100.0,
-        "trade_tick_value": 160.0,
-        "point": 0.01,
-        "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "analyze_history", lambda deals: {
         "win_rate": 0.6,
         "avg_win_ngn": 3000.0,
@@ -454,12 +554,13 @@ def test_kpi_endpoint_uses_requested_history_window(stub_mt5_ok, monkeypatch):
             "capital_end": target,
             "lot_size": 0.2,
             "daily_target_ngn": 2000,
+            "daily_target_units": 12.5,
             "daily_target_pips": 12.5,
             "min_trades_per_day": 2,
             "max_trades_per_day": 4,
         }
     ])
-    monkeypatch.setattr(api, "get_kpi_today", lambda deals_today, milestone, pip_value_ngn, balance, daily_loss_pct: {"status": "ON_TRACK"})
+    monkeypatch.setattr(api, "get_kpi_today", lambda deals_today, milestone, move_value_ngn, balance, daily_loss_pct, daily_limit_balance=None: {"status": "ON_TRACK"})
 
     def fake_history(date_from, date_to):
         captured["calls"] += 1
@@ -481,10 +582,11 @@ def test_marginal_returns_history_deals_for_symbol(stub_mt5_ok, monkeypatch):
     monkeypatch.setattr(api, "score_watchlist", lambda balance, daily_loss_pct, risk_pct: [
         {"symbol": "BTCUSDm", "classification": "SAFE", "score": 88},
     ])
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol, "volume_min": 0.01, "volume_step": 0.01,
-        "volume_max": 100.0, "trade_tick_value": 160.0, "point": 0.01, "atr": 15.0,
-    })
+    monkeypatch.setattr(
+        api,
+        "get_pair_info",
+        lambda symbol, asset_class=None: make_pair_info(symbol, asset_class, volume_min=0.01, volume_step=0.01),
+    )
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [
         {"symbol": "BTCUSDm", "profit": 1500.0, "volume": 0.01, "time": 1000},
         {"symbol": "BTCUSDm", "profit": -300.0, "volume": 0.01, "time": 2000},
@@ -502,6 +604,7 @@ def test_marginal_returns_history_deals_for_symbol(stub_mt5_ok, monkeypatch):
     assert "pair_info" in body
     assert "history_stats" in body
     assert "milestones" not in body   # /marginal never returns milestones
+    assert body["pair_info"]["move_unit_label"] == "Points"
 
 
 def test_marginal_falls_back_to_mt5_balance(stub_mt5_ok, monkeypatch):
@@ -512,10 +615,7 @@ def test_marginal_falls_back_to_mt5_balance(stub_mt5_ok, monkeypatch):
     # IMPORTANT: must patch get_pair_info to avoid get_pair_info calling mt5.symbol_info
     # which is not stubbed by stub_mt5_ok. Without this patch the call succeeds but
     # returns the hardcoded default pair info dict silently, not what we intend to test.
-    monkeypatch.setattr(api, "get_pair_info", lambda symbol: {
-        "symbol": symbol, "volume_min": 0.1, "volume_step": 0.1,
-        "volume_max": 100.0, "trade_tick_value": 160.0, "point": 0.01, "atr": 15.0,
-    })
+    monkeypatch.setattr(api, "get_pair_info", lambda symbol, asset_class=None: make_pair_info(symbol, asset_class))
     monkeypatch.setattr(api, "get_history_deals", lambda date_from, date_to: [])
 
     status, body = request_json("GET", "/marginal")

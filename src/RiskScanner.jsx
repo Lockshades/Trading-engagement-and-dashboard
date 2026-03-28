@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import TargetPlanner from './TargetPlanner.jsx';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const DEFAULT_SETTINGS = {
   balance:       150000,
@@ -454,6 +454,7 @@ export default function RiskScanner() {
       setData(json);
       setLast(new Date().toLocaleTimeString());
     } catch (e) {
+      console.error("Scan fetch error:", e);
       setError(e.message);
     } finally {
       setLoading(false);

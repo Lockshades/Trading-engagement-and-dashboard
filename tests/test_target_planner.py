@@ -11,6 +11,7 @@ from target_planner import (  # noqa: E402
     analyze_history,
     compute_milestones,
     get_kpi_today,
+    get_open_position_alignment,
 )
 
 
@@ -52,6 +53,21 @@ def test_analyze_history_consecutive_losses():
     ]
     stats = analyze_history(deals)
     assert stats["max_consecutive_losses"] == 2
+
+
+def test_analyze_history_uses_trade_average_fallback_for_thin_history():
+    deals = [
+        {"time": 1705190400, "profit": 1000.0, "volume": 0.01, "symbol": "BTCUSDm"},
+        {"time": 1705190500, "profit": -400.0, "volume": 0.01, "symbol": "BTCUSDm"},
+        {"time": 1705190600, "profit": 500.0, "volume": 0.01, "symbol": "BTCUSDm"},
+    ]
+    stats = analyze_history(deals)
+    assert stats["total_trading_days"] == 1
+    assert stats["total_deals"] == 3
+    assert stats["planner_baseline_source"] == "trade_average_fallback"
+    assert stats["planning_win_rate"] == pytest.approx(2 / 3, rel=0.001)
+    assert stats["planning_avg_win_ngn"] == pytest.approx(750.0, rel=0.001)
+    assert stats["planning_avg_loss_ngn"] == pytest.approx(400.0, rel=0.001)
 
 
 SAMPLE_STATS = {
@@ -157,6 +173,42 @@ def test_override_win_rate_applied():
     assert override_milestones[0]["est_days_mid"] < base_milestones[0]["est_days_mid"]
 
 
+def test_milestones_use_planner_baseline_stats_when_overrides_absent():
+    daily_stats = {
+        **SAMPLE_STATS,
+        "win_rate": 0.20,
+        "avg_win_ngn": 500.0,
+        "avg_loss_ngn": 1800.0,
+        "planning_win_rate": 0.75,
+        "planning_avg_win_ngn": 3200.0,
+        "planning_avg_loss_ngn": 900.0,
+        "planner_baseline_source": "trade_average_fallback",
+    }
+    baseline_milestones = compute_milestones(
+        100_000,
+        200_000,
+        daily_stats,
+        SAMPLE_PAIR_INFO,
+        {},
+        0.01,
+        0.02,
+    )
+    explicit_override_milestones = compute_milestones(
+        100_000,
+        200_000,
+        daily_stats,
+        SAMPLE_PAIR_INFO,
+        {
+            "win_rate": daily_stats["planning_win_rate"],
+            "avg_win_ngn": daily_stats["planning_avg_win_ngn"],
+            "avg_loss_ngn": daily_stats["planning_avg_loss_ngn"],
+        },
+        0.01,
+        0.02,
+    )
+    assert baseline_milestones[0]["est_days_mid"] == explicit_override_milestones[0]["est_days_mid"]
+
+
 def test_milestones_use_checkpoint_progression_for_large_targets():
     pair_info = {
         "symbol": "US500m",
@@ -257,6 +309,134 @@ def test_kpi_trades_remaining():
         160.0,
     )
     assert kpi["trades_remaining"] == 3
+
+
+def test_milestones_preserve_move_unit_for_crypto_pairs():
+    crypto_pair = {
+        **SAMPLE_PAIR_INFO,
+        "symbol": "BTCUSDm",
+        "move_unit_label": "Points",
+        "move_unit_short": "pt",
+        "move_value_ngn_per_lot": 160.0,
+    }
+    milestones = compute_milestones(
+        100_000,
+        200_000,
+        SAMPLE_STATS,
+        crypto_pair,
+        {},
+        0.01,
+        0.02,
+    )
+    assert milestones[0]["move_unit_label"] == "Points"
+    assert milestones[0]["move_unit_short"] == "pt"
+    assert "daily_target_units" in milestones[0]
+
+
+def test_kpi_returns_unit_metadata_for_non_forex_pairs():
+    kpi = get_kpi_today(
+        _make_deals([320]),
+        {
+            "daily_target_ngn": 2000,
+            "daily_target_units": 12.5,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
+            "min_trades_per_day": 2,
+            "max_trades_per_day": 4,
+        },
+        160.0,
+    )
+    assert kpi["move_unit_label"] == "Points"
+    assert kpi["move_unit_short"] == "pt"
+    assert kpi["actual_units"] == 2.0
+
+
+def test_kpi_uses_explicit_daily_limit_balance():
+    kpi = get_kpi_today(
+        _make_deals([-3000]),
+        {"daily_target_ngn": 2000, "daily_target_pips": 12.5, "min_trades_per_day": 2, "max_trades_per_day": 4},
+        160.0,
+        balance=150_000,
+        daily_loss_pct=0.02,
+        daily_limit_balance=100_000,
+    )
+    assert kpi["daily_limit_balance_ngn"] == 100_000
+    assert kpi["daily_limit_ngn"] == 2_000
+    assert kpi["status"] == "DANGER"
+
+
+def test_open_position_alignment_uses_trade_slots_for_daily_plan():
+    alignment = get_open_position_alignment(
+        [
+            {
+                "ticket": 1,
+                "symbol": "BTCUSDm",
+                "type": 0,
+                "type_label": "BUY",
+                "volume": 0.1,
+                "profit": 500.0,
+            }
+        ],
+        {
+            "daily_target_ngn": 2000.0,
+            "daily_target_units": 20.0,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
+            "lot_size": 0.1,
+            "min_trades_per_day": 2,
+            "max_trades_per_day": 4,
+        },
+        1000.0,
+        closed_trades_count=0,
+        volume_step=0.01,
+    )
+    assert alignment["planned_trade_slots"] == 2
+    assert alignment["target_ngn_per_trade"] == 1000.0
+    assert alignment["target_units_per_trade"] == 10.0
+    assert alignment["positions"][0]["pct_of_slot_target"] == 50.0
+    assert alignment["positions"][0]["settings_status"] == "MATCH"
+    assert alignment["positions"][0]["lot_matches_plan"] is True
+    assert alignment["status"] == "ON_TRACK"
+
+
+def test_open_position_alignment_flags_lot_and_trade_limit_mismatches():
+    alignment = get_open_position_alignment(
+        [
+            {
+                "ticket": 1,
+                "symbol": "BTCUSDm",
+                "type": 0,
+                "type_label": "BUY",
+                "volume": 0.2,
+                "profit": 500.0,
+            },
+            {
+                "ticket": 2,
+                "symbol": "BTCUSDm",
+                "type": 0,
+                "type_label": "BUY",
+                "volume": 0.1,
+                "profit": 200.0,
+            },
+        ],
+        {
+            "daily_target_ngn": 2000.0,
+            "daily_target_units": 20.0,
+            "move_unit_label": "Points",
+            "move_unit_short": "pt",
+            "lot_size": 0.1,
+            "min_trades_per_day": 1,
+            "max_trades_per_day": 1,
+        },
+        1000.0,
+        closed_trades_count=0,
+        volume_step=0.01,
+    )
+    assert alignment["matching_positions_count"] == 0
+    assert alignment["remaining_trade_slots"] == 0
+    assert alignment["positions"][0]["settings_status"] == "REVIEW"
+    assert alignment["positions"][1]["within_trade_limit"] is False
+    assert alignment["status"] == "REVIEW"
 
 
 def test_kpi_zero_pip_value_returns_zero_pips():

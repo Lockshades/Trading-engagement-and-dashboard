@@ -14,7 +14,7 @@ import {
   ComposedChart,
 } from 'recharts';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const STATUS_COLOURS = {
   AHEAD: '#22c55e',
@@ -22,6 +22,7 @@ const STATUS_COLOURS = {
   BEHIND: '#f59e0b',
   DANGER: '#ef4444',
   COMPLETE: '#a78bfa',
+  REVIEW: '#f59e0b',
 };
 
 const QUALITY_COLOURS = {
@@ -222,12 +223,31 @@ function formatMoney(value) {
   return `NGN ${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}`;
 }
 
+function getMoveUnitLabel(label) {
+  return label || 'Pips';
+}
+
+function getMoveUnitValue(primaryValue, fallbackValue) {
+  const primary = Number(primaryValue);
+  if (Number.isFinite(primary)) return primary;
+
+  const fallback = Number(fallbackValue);
+  return Number.isFinite(fallback) ? fallback : 0;
+}
+
 function formatBalanceSource(source) {
   if (source === 'manual_override') return 'Manual override';
   if (source === 'mt5_balance') return 'MT5 balance';
   if (source === 'mt5_equity') return 'MT5 equity fallback';
   if (source === 'mt5_unavailable') return 'MT5 unavailable';
   return 'Balance source';
+}
+
+function formatPlannerBaseline(source) {
+  if (source === 'history_daily') return 'Historical daily analysis';
+  if (source === 'trade_average_fallback') return 'Simple trade-average fallback';
+  if (source === 'defaults') return 'Estimated defaults';
+  return 'Historical analysis';
 }
 
 function getMt5SnapshotBalance(accountSnapshot) {
@@ -312,6 +332,8 @@ function ConfidenceBand({ low, mid, high, mode }) {
 function MilestoneCard({ milestone, index }) {
   const [expanded, setExpanded] = useState(false);
   const qualityColour = QUALITY_COLOURS[milestone.data_quality] || '#888';
+  const moveUnitLabel = getMoveUnitLabel(milestone.move_unit_label);
+  const dailyTargetUnits = getMoveUnitValue(milestone.daily_target_units, milestone.daily_target_pips);
   const estimateLabel = formatDays(
     milestone.est_days_low,
     milestone.est_days_mid,
@@ -382,7 +404,7 @@ function MilestoneCard({ milestone, index }) {
           {[
             ['Planner Pair', milestone.pair],
             ['Daily Target', formatMoney(milestone.daily_target_ngn)],
-            ['Daily Pips', milestone.daily_target_pips],
+            [`Daily ${moveUnitLabel}`, dailyTargetUnits],
             ['Min Trades', milestone.min_trades_per_day],
             ['Max Trades', milestone.max_trades_per_day],
             ['Loss Survival', milestone.consecutive_loss_survival],
@@ -473,6 +495,75 @@ function OverrideInput({ label, value, suffix, onChange, onClear }) {
   );
 }
 
+function SurfaceCard({ title, subtitle, accent = '#38bdf8', children, right }) {
+  return (
+    <div style={{
+      background: '#111',
+      border: '1px solid #1e1e1e',
+      borderTop: `2px solid ${accent}`,
+      borderRadius: 10,
+      padding: '16px 18px',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#f0f0f0' }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>{subtitle}</div>}
+        </div>
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, note, colour = '#f0f0f0' }) {
+  return (
+    <div style={{
+      minWidth: 140,
+      flex: '1 1 140px',
+      background: '#0f1720',
+      border: '1px solid #1e1e1e',
+      borderRadius: 8,
+      padding: '12px 14px',
+    }}>
+      <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: colour, marginTop: 6 }}>{value}</div>
+      {note && <div style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{note}</div>}
+    </div>
+  );
+}
+
+function StatusBanner({ title, subtitle, colour }) {
+  return (
+    <div style={{
+      background: `${colour}15`,
+      border: `1px solid ${colour}44`,
+      borderRadius: 10,
+      padding: '14px 16px',
+    }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: colour }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 12, color: '#cbd5e1', marginTop: 4 }}>{subtitle}</div>}
+    </div>
+  );
+}
+
+function EmptyState({ title, body }) {
+  return (
+    <div style={{
+      color: '#666',
+      fontSize: 13,
+      textAlign: 'center',
+      padding: '40px 20px',
+      background: '#111',
+      border: '1px solid #1e1e1e',
+      borderRadius: 10,
+    }}>
+      <div style={{ color: '#e0e0e0', fontWeight: 700, marginBottom: 6 }}>{title}</div>
+      <div>{body}</div>
+    </div>
+  );
+}
+
 export default function TargetPlanner({ settings, liveBalance, balanceSource, accountSnapshot, selectedSymbol, selectedPair }) {
   const [subTab, setSubTab] = useState('path');
   const [targetInput, setTargetInput] = useState('');
@@ -510,9 +601,31 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
     && ((planData.history_window_days ?? 'all') === (historyDays ?? 'all'));
   const activePlan = planMatchesInput ? planData : null;
   const totalTradingDays = activePlan?.history_stats?.total_trading_days || 0;
+  const activeMoveUnitLabel = getMoveUnitLabel(
+    activePlan?.pair_info?.move_unit_label || activePlan?.milestones?.[0]?.move_unit_label
+  );
   const noHistory = Boolean(activePlan?.history_stats?.no_history);
   const veryThinHistory = totalTradingDays > 0 && totalTradingDays < 3;
   const lowData = totalTradingDays >= 3 && Boolean(activePlan?.history_stats?.low_data_warning);
+  const plannerBaselineSource = activePlan?.history_stats?.planner_baseline_source;
+  const storedOverrideCount = Object.keys(overrides).length;
+  const appliedOverrides = showOverrides ? overrides : {};
+  const appliedOverrideCount = Object.keys(appliedOverrides).length;
+  const planMilestones = activePlan?.milestones || [];
+  const firstMilestone = planMilestones[0] || null;
+  const planHeadline = firstMilestone
+    ? `Start with ${firstMilestone.lot_size} lot and aim for ${formatMoney(firstMilestone.capital_end)} first.`
+    : null;
+  const planTrustLabel = noHistory
+    ? 'Estimated defaults'
+    : plannerBaselineSource === 'trade_average_fallback'
+      ? 'Simple trade averages'
+      : 'Historical daily analysis';
+  const planWarnings = [
+    noHistory ? 'No history found. This plan is running on defaults until trading data builds up.' : null,
+    veryThinHistory ? `Only ${totalTradingDays} trading day${totalTradingDays === 1 ? '' : 's'} found for this pair.` : null,
+    lowData ? 'Sample size is still limited, so timing bands are wider than normal.' : null,
+  ].filter(Boolean);
   const analysisCapital = activePlan?.balance_ngn || balance;
   const analysisThreshold = analysisCapital * (analysisThresholdPct / 100);
   const marginalDays = useMemo(
@@ -625,7 +738,7 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
           planning_symbol: selectedSymbol,
           history_days: historyDays,
           use_all_history: useAllHistory,
-          overrides,
+          overrides: appliedOverrides,
         }),
       });
 
@@ -727,71 +840,39 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
 
       {subTab === 'path' && (
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 999,
-              background: selectedPair ? '#38bdf822' : '#171717',
-              border: `1px solid ${selectedPair ? '#38bdf855' : '#333'}`,
-              marginRight: 4,
-            }}>
-              <span style={{ fontSize: 11, color: '#666' }}>Pair</span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: selectedPair ? '#38bdf8' : '#999' }}>
-                {selectedPair?.symbol || 'Choose in Scanner'}
-              </span>
-              {selectedPair && (
-                <span style={{ fontSize: 11, color: '#999' }}>
-                  {selectedPair.classification} · {selectedPair.score}/100
+          <SurfaceCard
+            title="Build your target plan"
+            subtitle="Start with the pair you trust, set the balance goal you want to reach, and let the planner show the next realistic step."
+            accent="#22c55e"
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                borderRadius: 999,
+                background: selectedPair ? '#38bdf822' : '#171717',
+                border: `1px solid ${selectedPair ? '#38bdf855' : '#333'}`,
+              }}>
+                <span style={{ fontSize: 11, color: '#666' }}>Pair</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: selectedPair ? '#38bdf8' : '#999' }}>
+                  {selectedPair?.symbol || 'Choose in Scanner'}
                 </span>
-              )}
-            </div>
-            <span style={{ fontSize: 13, color: '#888' }}>Target</span>
-            <span style={{ fontSize: 13, color: '#666' }}>NGN</span>
-            <input
-              type="number"
-              placeholder="1000000"
-              value={targetInput}
-              onChange={(event) => {
-                setTargetInput(event.target.value);
-                setKpiData(null);
-                setError(null);
-              }}
-              style={{
-                background: '#111',
-                border: '1px solid #333',
-                color: '#e0e0e0',
-                borderRadius: 6,
-                padding: '7px 12px',
-                fontSize: 14,
-                width: 180,
-              }}
-            />
-            <button
-              onClick={fetchPlan}
-              disabled={loading || !canGeneratePlan}
-              style={{
-                background: canGeneratePlan ? '#22c55e22' : '#1a1a1a',
-                color: canGeneratePlan ? '#22c55e' : '#555',
-                border: `1px solid ${canGeneratePlan ? '#22c55e' : '#333'}`,
-                borderRadius: 6,
-                padding: '7px 20px',
-                cursor: loading || !canGeneratePlan ? 'not-allowed' : 'pointer',
-                fontSize: 13,
-                fontWeight: 600,
-              }}
-            >
-              {loading ? 'Planning...' : 'Generate Plan'}
-            </button>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 4 }}>
-              <span style={{ fontSize: 12, color: '#666' }}>History</span>
-              <select
-                value={historyRange}
+                {selectedPair && (
+                  <span style={{ fontSize: 11, color: '#999' }}>
+                    {selectedPair.classification} - {selectedPair.score}/100
+                  </span>
+                )}
+              </div>
+              <span style={{ fontSize: 13, color: '#888' }}>Target</span>
+              <span style={{ fontSize: 13, color: '#666' }}>NGN</span>
+              <input
+                type="number"
+                placeholder="1000000"
+                value={targetInput}
                 onChange={(event) => {
-                  setHistoryRange(event.target.value);
-                  setPlanData(null);
+                  setTargetInput(event.target.value);
                   setKpiData(null);
                   setError(null);
                 }}
@@ -800,187 +881,273 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
                   border: '1px solid #333',
                   color: '#e0e0e0',
                   borderRadius: 6,
-                  padding: '7px 10px',
+                  padding: '9px 12px',
+                  fontSize: 14,
+                  width: 190,
+                }}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: '#666' }}>History</span>
+                <select
+                  value={historyRange}
+                  onChange={(event) => {
+                    setHistoryRange(event.target.value);
+                    setPlanData(null);
+                    setKpiData(null);
+                    setError(null);
+                  }}
+                  style={{
+                    background: '#111',
+                    border: '1px solid #333',
+                    color: '#e0e0e0',
+                    borderRadius: 6,
+                    padding: '9px 10px',
+                    fontSize: 13,
+                  }}
+                >
+                  {HISTORY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={fetchPlan}
+                disabled={loading || !canGeneratePlan}
+                style={{
+                  background: canGeneratePlan ? '#22c55e22' : '#1a1a1a',
+                  color: canGeneratePlan ? '#22c55e' : '#555',
+                  border: `1px solid ${canGeneratePlan ? '#22c55e' : '#333'}`,
+                  borderRadius: 6,
+                  padding: '9px 20px',
+                  cursor: loading || !canGeneratePlan ? 'not-allowed' : 'pointer',
                   fontSize: 13,
+                  fontWeight: 600,
                 }}
               >
-                {HISTORY_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+                {loading ? 'Building plan...' : 'Generate plan'}
+              </button>
             </div>
-          </div>
+
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <MiniStat
+                label="Current balance"
+                value={formatMoney(balance)}
+                note={settings?.useMt5Balance
+                  ? (mt5SnapshotBalance !== null ? `Using ${formatBalanceSource(mt5SnapshotSource || balanceSource)}` : 'Waiting for MT5 snapshot')
+                  : 'Manual balance override'}
+              />
+              <MiniStat
+                label="Selected pair"
+                value={selectedPair?.symbol || 'Not selected'}
+                note={selectedPair ? `${selectedPair.classification} scan result` : 'Select one in Scanner first'}
+                colour={selectedPair ? '#38bdf8' : '#999'}
+              />
+              <MiniStat
+                label="Planner mode"
+                value={formatPlannerBaseline(plannerBaselineSource)}
+                note={activePlan ? `${totalTradingDays} trading day${totalTradingDays === 1 ? '' : 's'} found` : 'Will show after plan generation'}
+                colour="#f0f0f0"
+              />
+            </div>
+          </SurfaceCard>
+
+          {error && <div style={{ color: '#ef4444', fontSize: 12, margin: '14px 0' }}>{error}</div>}
 
           {!hasSelectedSymbol && (
-            <div style={{ color: '#f59e0b', fontSize: 12, marginBottom: 14 }}>
-              Choose one scanned pair in the Scanner tab first. That selection is used throughout the Target workflow.
+            <div style={{ marginTop: 16 }}>
+              <EmptyState
+                title="Choose a pair first"
+                body="Use the Scanner tab to select the pair you want this Target workflow to follow."
+              />
             </div>
           )}
 
           {hasSelectedSymbol && !hasValidTarget && targetInput && (
-            <div style={{ color: '#f59e0b', fontSize: 12, marginBottom: 14 }}>
-              Enter a target greater than {formatMoney(balance)}.
+            <div style={{ marginTop: 16 }}>
+              <StatusBanner
+                title="Your target needs to be above your current balance"
+                subtitle={`Set a value above ${formatMoney(balance)} so the planner can build a path.`}
+                colour="#f59e0b"
+              />
             </div>
           )}
-
-          {settings?.useMt5Balance && (
-            <div style={{ color: '#555', fontSize: 12, marginBottom: 14 }}>
-              {mt5SnapshotBalance !== null
-                ? `Using ${formatBalanceSource(mt5SnapshotSource || balanceSource)} at ${formatMoney(mt5SnapshotBalance)} for current balance checks.`
-                : 'Waiting for a live MT5 balance snapshot. Generate a fresh scan before relying on MT5-based target validation.'}
-            </div>
-          )}
-
-          {noHistory && (
-            <div style={{ background: '#1a1200', border: '1px solid #f59e0b55', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#f59e0b' }}>
-              No trade history found. Using estimated defaults. Adjust the overrides below to match your expectations.
-            </div>
-          )}
-
-          {veryThinHistory && (
-            <div style={{ background: '#1a1200', border: '1px solid #f59e0b55', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#f59e0b' }}>
-              Only {totalTradingDays} trading day{totalTradingDays === 1 ? '' : 's'} of history found. Overrides are opened by default because estimates lean on fallback assumptions.
-            </div>
-          )}
-
-          {lowData && (
-            <div style={{ background: '#1a1200', border: '1px solid #f9731655', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#f97316' }}>
-              Only {totalTradingDays} trading days of history are available. Confidence bands are widened to reflect limited data.
-            </div>
-          )}
-
-          {activePlan && totalTradingDays < 20 && !useAllHistory && (
-            <div style={{ background: '#0f1720', border: '1px solid #38bdf844', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#38bdf8' }}>
-              Recent history is thin. Try 180d, 365d, or All to include more MT5 history in the Target plan.
-            </div>
-          )}
-
-          <div style={{ marginBottom: 16 }}>
-            <button
-              onClick={() => setShowOverrides((value) => !value)}
-              style={{
-                background: 'transparent',
-                color: '#555',
-                border: '1px solid #2a2a2a',
-                borderRadius: 6,
-                padding: '4px 12px',
-                cursor: 'pointer',
-                fontSize: 11,
-              }}
-            >
-              {showOverrides ? 'Hide' : 'Show'} manual overrides {Object.keys(overrides).length > 0 ? `(${Object.keys(overrides).length} active)` : ''}
-            </button>
-
-            {showOverrides && (
-              <div style={{
-                background: '#111',
-                border: '1px solid #2a2a2a',
-                borderRadius: 8,
-                padding: '14px',
-                marginTop: 8,
-                display: 'flex',
-                gap: 20,
-                flexWrap: 'wrap',
-              }}>
-                <OverrideInput
-                  label="Win Rate"
-                  value={overrides.win_rate !== undefined ? overrides.win_rate * 100 : 50}
-                  suffix="%"
-                  onChange={setOverride('win_rate', 100)}
-                  onClear={clearOverride('win_rate')}
-                />
-                <OverrideInput
-                  label="Avg Win (NGN)"
-                  value={overrides.avg_win_ngn !== undefined ? overrides.avg_win_ngn : 2000}
-                  onChange={setOverride('avg_win_ngn')}
-                  onClear={clearOverride('avg_win_ngn')}
-                />
-                <OverrideInput
-                  label="Avg Loss (NGN)"
-                  value={overrides.avg_loss_ngn !== undefined ? overrides.avg_loss_ngn : 1500}
-                  onChange={setOverride('avg_loss_ngn')}
-                  onClear={clearOverride('avg_loss_ngn')}
-                />
-                <div style={{ alignSelf: 'flex-end' }}>
-                  <button
-                    onClick={fetchPlan}
-                    style={{
-                      background: '#f59e0b22',
-                      color: '#f59e0b',
-                      border: '1px solid #f59e0b',
-                      borderRadius: 6,
-                      padding: '6px 14px',
-                      cursor: 'pointer',
-                      fontSize: 11,
-                    }}
-                  >
-                    Recalculate
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 12 }}>{error}</div>}
 
           {activePlan && (
-            <div style={{
-              display: 'flex',
-              gap: 18,
-              flexWrap: 'wrap',
-              padding: '10px 14px',
-              background: '#111',
-              border: '1px solid #1e1e1e',
-              borderRadius: 8,
-              marginBottom: 16,
-            }}>
-              <div>
-                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Planner Pair</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{activePlan.planning_symbol}</div>
+            <>
+              <div style={{ marginTop: 16 }}>
+                <StatusBanner
+                  title={planHeadline || 'No milestone path generated yet'}
+                  subtitle={planMilestones.length > 0
+                    ? `${planMilestones.length} milestone${planMilestones.length === 1 ? '' : 's'} from ${formatMoney(activePlan.balance_ngn)} to ${formatMoney(activePlan.target_ngn)}.`
+                    : 'Try a different target or a wider history window.'}
+                  colour="#22c55e"
+                />
               </div>
-              <div>
-                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Balance</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{formatMoney(activePlan.balance_ngn)}</div>
-                {activePlan.balance_source && (
-                  <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>{formatBalanceSource(activePlan.balance_source)}</div>
-                )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16, marginTop: 16 }}>
+                <SurfaceCard
+                  title="Your next practical step"
+                  subtitle="This is what the planner wants you to focus on first."
+                  accent="#38bdf8"
+                >
+                  {firstMilestone ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: '#f0f0f0' }}>{formatMoney(firstMilestone.capital_end)}</div>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>First milestone target from {formatMoney(firstMilestone.capital_start)}</div>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        <MiniStat label="Suggested lot" value={`${firstMilestone.lot_size}`} note="Starting size" colour="#38bdf8" />
+                        <MiniStat label="Daily profit target" value={formatMoney(firstMilestone.daily_target_ngn)} note="Expected pace" colour="#22c55e" />
+                        <MiniStat label={`Daily ${activeMoveUnitLabel.toLowerCase()}`} value={Number(getMoveUnitValue(firstMilestone.daily_target_units, firstMilestone.daily_target_pips)).toLocaleString(undefined, { maximumFractionDigits: 1 })} note="Movement needed" colour="#f0f0f0" />
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: '#666' }}>
+                      No starting milestone is available yet.
+                    </div>
+                  )}
+                </SurfaceCard>
+
+                <SurfaceCard
+                  title="How much to trust this plan"
+                  subtitle="This tells you what the planner is relying on."
+                  accent={planWarnings.length > 0 ? '#f59e0b' : '#22c55e'}
+                >
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <MiniStat label="Plan basis" value={planTrustLabel} note="Main source used" />
+                    <MiniStat label="Matching deals" value={activePlan.history_deals_count} note={`${activePlan.history_total_deals_count} total sampled`} colour="#38bdf8" />
+                    <MiniStat label="Win rate" value={`${Math.round(Number(activePlan.history_stats?.planning_win_rate || 0) * 100)}%`} note={`${formatMoney(activePlan.history_stats?.planning_avg_win_ngn)} avg win`} />
+                  </div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 12 }}>
+                    Avg loss: {formatMoney(activePlan.history_stats?.planning_avg_loss_ngn)}. {activeMoveUnitLabel === 'Points'
+                      ? `${activePlan.planning_symbol} is tracked in points in this section.`
+                      : `${activePlan.planning_symbol} is tracked in pips in this section.`}
+                  </div>
+                </SurfaceCard>
+
+                <SurfaceCard
+                  title="Warnings and adjustments"
+                  subtitle="Use these to judge whether the current plan is ready to act on."
+                  accent={planWarnings.length > 0 ? '#f59e0b' : '#22c55e'}
+                >
+                  {planWarnings.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {planWarnings.map((warning) => (
+                        <div key={warning} style={{ fontSize: 12, color: '#f59e0b', background: '#1a1200', border: '1px solid #f59e0b33', borderRadius: 8, padding: '10px 12px' }}>
+                          {warning}
+                        </div>
+                      ))}
+                      {totalTradingDays < 20 && !useAllHistory && (
+                        <div style={{ fontSize: 12, color: '#38bdf8' }}>
+                          Try 180d, 365d, or All history if you want this plan to lean on a broader sample.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: '#22c55e' }}>
+                      This plan is using a healthy enough sample for the selected pair.
+                    </div>
+                  )}
+                </SurfaceCard>
               </div>
-              <div>
-                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#22c55e' }}>{formatMoney(activePlan.target_ngn)}</div>
+
+              <div style={{ marginTop: 16 }}>
+                <SurfaceCard
+                  title="Advanced planner controls"
+                  subtitle="Only use overrides when you want to intentionally overrule the historical picture."
+                  accent="#f59e0b"
+                  right={(
+                    <button
+                      onClick={() => setShowOverrides((value) => !value)}
+                      style={{
+                        background: 'transparent',
+                        color: '#aaa',
+                        border: '1px solid #2a2a2a',
+                        borderRadius: 6,
+                        padding: '6px 12px',
+                        cursor: 'pointer',
+                        fontSize: 11,
+                      }}
+                    >
+                      {showOverrides ? 'Hide controls' : 'Show controls'} {showOverrides
+                        ? (appliedOverrideCount > 0 ? `(${appliedOverrideCount} active)` : '')
+                        : (storedOverrideCount > 0 ? `(${storedOverrideCount} saved)` : '')}
+                    </button>
+                  )}
+                >
+                  {!showOverrides && (
+                    <div style={{ fontSize: 12, color: '#666' }}>
+                      Hidden overrides are not applied. The planner is currently using {planTrustLabel.toLowerCase()}.
+                    </div>
+                  )}
+                  {showOverrides && (
+                    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+                      <OverrideInput
+                        label="Win Rate"
+                        value={overrides.win_rate !== undefined ? overrides.win_rate * 100 : 50}
+                        suffix="%"
+                        onChange={setOverride('win_rate', 100)}
+                        onClear={clearOverride('win_rate')}
+                      />
+                      <OverrideInput
+                        label="Avg Win (NGN)"
+                        value={overrides.avg_win_ngn !== undefined ? overrides.avg_win_ngn : 2000}
+                        onChange={setOverride('avg_win_ngn')}
+                        onClear={clearOverride('avg_win_ngn')}
+                      />
+                      <OverrideInput
+                        label="Avg Loss (NGN)"
+                        value={overrides.avg_loss_ngn !== undefined ? overrides.avg_loss_ngn : 1500}
+                        onChange={setOverride('avg_loss_ngn')}
+                        onClear={clearOverride('avg_loss_ngn')}
+                      />
+                      <div style={{ alignSelf: 'flex-end' }}>
+                        <button
+                          onClick={fetchPlan}
+                          style={{
+                            background: '#f59e0b22',
+                            color: '#f59e0b',
+                            border: '1px solid #f59e0b',
+                            borderRadius: 6,
+                            padding: '6px 14px',
+                            cursor: 'pointer',
+                            fontSize: 11,
+                          }}
+                        >
+                          Recalculate with overrides
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </SurfaceCard>
               </div>
-              <div>
-                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Window</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{activePlan.history_window_label}</div>
-                <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
-                  {activePlan.history_deals_count} of {activePlan.history_total_deals_count} deal{activePlan.history_total_deals_count === 1 ? '' : 's'} matched this pair
+
+              {planMilestones.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <SurfaceCard
+                    title="Milestone path"
+                    subtitle="Open any milestone to see its pace, trade range, and survival details."
+                    accent="#38bdf8"
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {planMilestones.map((milestone, index) => (
+                        <MilestoneCard key={`${milestone.capital_start}-${milestone.capital_end}`} milestone={milestone} index={index} />
+                      ))}
+                    </div>
+                  </SurfaceCard>
                 </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Days</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#38bdf8' }}>{totalTradingDays}</div>
-                <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>Trading days found</div>
-              </div>
-            </div>
-          )}
+              )}
 
-          {activePlan?.milestones?.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ fontSize: 11, color: '#444', marginBottom: 2 }}>
-                {activePlan.milestones.length} milestone{activePlan.milestones.length !== 1 ? 's' : ''} to reach {formatMoney(parsedTarget)}
-              </div>
-              {activePlan.milestones.map((milestone, index) => (
-                <MilestoneCard key={`${milestone.capital_start}-${milestone.capital_end}`} milestone={milestone} index={index} />
-              ))}
-            </div>
-          )}
-
-          {activePlan && activePlan.milestones?.length === 0 && (
-            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 20 }}>
-              No milestones were generated for this target.
-            </div>
+              {planMilestones.length === 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <EmptyState
+                    title="No milestone path was generated"
+                    body="Try a wider history window, a more realistic target, or review the selected pair's history before relying on this plan."
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -995,6 +1162,19 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
 
           {activePlan && (
             <>
+              <SurfaceCard
+                title="Validate the edge behind the plan"
+                subtitle="Use this view when you want to understand whether the selected pair's history actually supports the planner, or whether extra trades tend to hurt the day."
+                accent="#38bdf8"
+              >
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <MiniStat label="Window" value={activePlan.history_window_label} note={`${totalTradesSampled} deals sampled`} />
+                  <MiniStat label="Trading days" value={totalTradingDays} note="Days found for this pair" colour="#38bdf8" />
+                  <MiniStat label="Threshold-hit days" value={thresholdHitDays} note={`${marginalDays.length} days sampled`} colour="#22c55e" />
+                  <MiniStat label="Threshold" value={formatMoney(analysisThreshold)} note={`${analysisThresholdPct.toFixed(1)}% of current capital`} colour="#f0f0f0" />
+                </div>
+              </SurfaceCard>
+
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
                 {[
                   ['Window', activePlan.history_window_label, `${totalTradesSampled} deals`],
@@ -1180,140 +1360,239 @@ export default function TargetPlanner({ settings, liveBalance, balanceSource, ac
 
       {subTab === 'kpi' && (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 12, color: '#555' }}>
-              {new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-            </span>
-            <button
-              onClick={fetchKPI}
-              disabled={kpiLoading || !canGeneratePlan}
-              style={{
-                background: '#1e1e1e',
-                color: canGeneratePlan ? '#e0e0e0' : '#555',
-                border: '1px solid #333',
-                borderRadius: 6,
-                padding: '5px 14px',
-                cursor: kpiLoading || !canGeneratePlan ? 'not-allowed' : 'pointer',
-                fontSize: 11,
-              }}
-            >
-              {kpiLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
-          </div>
+          <SurfaceCard
+            title="Today's execution view"
+            subtitle="Use this to see whether today's trading is aligned with the current plan."
+            accent="#38bdf8"
+            right={(
+              <button
+                onClick={fetchKPI}
+                disabled={kpiLoading || !canGeneratePlan}
+                style={{
+                  background: '#1e1e1e',
+                  color: canGeneratePlan ? '#e0e0e0' : '#555',
+                  border: '1px solid #333',
+                  borderRadius: 6,
+                  padding: '8px 14px',
+                  cursor: kpiLoading || !canGeneratePlan ? 'not-allowed' : 'pointer',
+                  fontSize: 11,
+                }}
+              >
+                {kpiLoading ? 'Refreshing...' : 'Refresh today'}
+              </button>
+            )}
+          >
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <MiniStat label="Date" value={new Date().toLocaleDateString('en-GB')} note="Today's trading session" />
+              <MiniStat label="Selected pair" value={selectedSymbol || 'Not selected'} note="Comes from Scanner" colour={selectedSymbol ? '#38bdf8' : '#999'} />
+              <MiniStat label="Target" value={hasValidTarget ? formatMoney(parsedTarget) : 'Not ready'} note={hasValidTarget ? 'Current plan target' : 'Set this in Path first'} colour={hasValidTarget ? '#22c55e' : '#999'} />
+            </div>
+          </SurfaceCard>
 
-          {error && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 12 }}>{error}</div>}
+          {error && <div style={{ color: '#ef4444', fontSize: 12, margin: '14px 0' }}>{error}</div>}
 
           {!hasSelectedSymbol && (
-            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
-              Select a pair in the Scanner tab before loading KPI data.
+            <div style={{ marginTop: 16 }}>
+              <EmptyState
+                title="Select a pair before using Daily KPI"
+                body="The KPI view follows the pair you selected in the Scanner tab."
+              />
             </div>
           )}
 
           {hasSelectedSymbol && !hasValidTarget && (
-            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
-              Enter a target above your current balance in the Path tab before loading KPI data.
+            <div style={{ marginTop: 16 }}>
+              <EmptyState
+                title="Set a target before checking today's alignment"
+                body="Open Path, set a target above your current balance, and generate the plan first."
+              />
             </div>
           )}
 
           {canGeneratePlan && !kpiLoading && !kpiData && (
-            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
-              Open the Path tab to generate a plan, or refresh here to load today&apos;s KPI snapshot for the current target.
+            <div style={{ marginTop: 16 }}>
+              <EmptyState
+                title="No KPI snapshot loaded yet"
+                body="Refresh this view to pull today's live trading picture for the current pair and target."
+              />
             </div>
           )}
 
           {canGeneratePlan && !kpiLoading && kpiData && !kpiData.current_milestone && (
-            <div style={{ color: '#444', fontSize: 13, textAlign: 'center', paddingTop: 40 }}>
-              No active milestone is available for this target yet.
+            <div style={{ marginTop: 16 }}>
+              <EmptyState
+                title="No active milestone for this target"
+                body="The planner could not identify an active milestone for the current target and balance state."
+              />
             </div>
           )}
 
           {kpiData?.kpi && Object.keys(kpiData.kpi).length > 0 && (() => {
             const kpi = kpiData.kpi;
             const statusColour = STATUS_COLOURS[kpi.status] || '#888';
+            const moveUnitLabel = getMoveUnitLabel(kpi.move_unit_label || kpiData.current_milestone?.move_unit_label);
+            const actualMoveUnits = getMoveUnitValue(kpi.actual_units, kpi.actual_pips);
+            const targetMoveUnits = getMoveUnitValue(kpi.target_units, kpi.target_pips);
+            const openAlignment = kpiData.open_position_alignment || {};
+            const openAlignmentStatusColour = STATUS_COLOURS[openAlignment.status] || '#38bdf8';
+            const openMoveUnitLabel = getMoveUnitLabel(openAlignment.move_unit_label || moveUnitLabel);
+            const openTotalUnits = getMoveUnitValue(openAlignment.total_open_units, 0);
+            const openTargetUnits = getMoveUnitValue(
+              openAlignment.target_units_for_open_positions,
+              openAlignment.target_units_per_trade
+            );
+            const closedTradesTaken = Number.isFinite(Number(kpi.closed_trades_taken))
+              ? Number(kpi.closed_trades_taken)
+              : Number(kpi.trades_taken || 0);
+            const openPositionsCount = Number.isFinite(Number(kpi.open_positions_count))
+              ? Number(kpi.open_positions_count)
+              : Number(openAlignment.positions_count || 0);
+            const activeTradesTaken = Number.isFinite(Number(kpi.active_trades_taken))
+              ? Number(kpi.active_trades_taken)
+              : closedTradesTaken + openPositionsCount;
+            const remainingTradesIncludingOpen = Number.isFinite(Number(kpi.trades_remaining_including_open))
+              ? Number(kpi.trades_remaining_including_open)
+              : Math.max(Number(kpi.max_trades || 0) - activeTradesTaken, 0);
+            const nextAction = kpi.status === 'DANGER'
+              ? `Stop trading for today. Your daily loss limit is ${formatMoney(kpi.daily_limit_ngn)}.`
+              : kpi.status === 'COMPLETE'
+                ? 'The daily target is met. Protect the day and avoid giving it back.'
+                : openAlignment.positions_count > 0
+                  ? 'Monitor your live positions against the trade-slot plan below.'
+                  : 'Use this as your reference pace before opening the next trade.';
 
             return (
               <>
-                <div style={{
-                  background: `${statusColour}15`,
-                  border: `1px solid ${statusColour}44`,
-                  borderRadius: 8,
-                  padding: '10px 16px',
-                  marginBottom: 16,
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 12,
-                  flexWrap: 'wrap',
-                }}>
-                  <span style={{ fontWeight: 700, color: statusColour, fontSize: 14 }}>{kpi.status}</span>
-                  <span style={{ fontSize: 12, color: '#888' }}>{kpi.pct_of_target}% of daily target</span>
+                <div style={{ marginTop: 16 }}>
+                  <StatusBanner
+                    title={`${kpi.status}: ${Number(kpi.pct_of_target || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}% of today's target`}
+                    subtitle={nextAction}
+                    colour={statusColour}
+                  />
                 </div>
 
-                <div style={{
-                  display: 'flex',
-                  gap: 18,
-                  flexWrap: 'wrap',
-                  padding: '10px 14px',
-                  background: '#111',
-                  border: '1px solid #1e1e1e',
-                  borderRadius: 8,
-                  marginBottom: 16,
-                }}>
-                  <div>
-                    <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Planner Pair</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{kpiData.planning_symbol}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>History Window</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>{kpiData.history_window_label}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Milestone Range</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0f0f0' }}>
-                      {formatMoney(kpiData.current_milestone.capital_start)} to {formatMoney(kpiData.current_milestone.capital_end)}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 16 }}>
+                  <SurfaceCard title="Today's score" subtitle="How today is tracking against plan." accent={statusColour}>
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                      <MiniStat label="P&L today" value={formatMoney(kpi.actual_ngn)} note={`Target ${formatMoney(kpi.target_ngn)}`} colour={kpi.actual_ngn >= 0 ? '#22c55e' : '#ef4444'} />
+                      <MiniStat label={`${moveUnitLabel} today`} value={Number(actualMoveUnits).toLocaleString(undefined, { maximumFractionDigits: 1 })} note={`Target ${Number(targetMoveUnits).toLocaleString(undefined, { maximumFractionDigits: 1 })}`} colour="#38bdf8" />
                     </div>
-                  </div>
-                </div>
+                  </SurfaceCard>
 
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-                  <KPICard
-                    label="P&L Today"
-                    actual={kpi.actual_ngn}
-                    target={kpi.target_ngn}
-                    unit="NGN "
-                    colour={kpi.actual_ngn >= 0 ? '#22c55e' : '#ef4444'}
-                  />
-                  <KPICard
-                    label="Pips Today"
-                    actual={kpi.actual_pips}
-                    target={kpi.target_pips}
-                    unit=""
-                    colour="#38bdf8"
-                  />
-                </div>
+                  <SurfaceCard title="Trade usage" subtitle="How many trade slots you've used." accent="#38bdf8">
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                      <MiniStat label="Closed" value={closedTradesTaken} note="Completed today" />
+                      <MiniStat label="Open" value={openPositionsCount} note="Still running" colour="#a78bfa" />
+                      <MiniStat label="Remaining" value={remainingTradesIncludingOpen} note={`Plan range ${kpi.min_trades}-${kpi.max_trades}`} colour="#22c55e" />
+                    </div>
+                  </SurfaceCard>
 
-                <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 8, padding: '12px 14px' }}>
-                  <div style={{ fontSize: 10, color: '#555', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Trades</div>
-                  <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-                    {[
-                      ['Taken', kpi.trades_taken, '#f0f0f0'],
-                      ['Remaining', kpi.trades_remaining, '#38bdf8'],
-                      ['Min', kpi.min_trades, '#22c55e'],
-                      ['Max', kpi.max_trades, '#f59e0b'],
-                    ].map(([label, value, colour]) => (
-                      <div key={label}>
-                        <div style={{ fontSize: 10, color: '#555' }}>{label}</div>
-                        <div style={{ fontSize: 20, fontWeight: 700, color: colour }}>{value}</div>
+                  <SurfaceCard title="Milestone context" subtitle="Where today's work sits inside the bigger plan." accent="#22c55e">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: '#f0f0f0' }}>
+                        {formatMoney(kpiData.current_milestone.capital_start)} to {formatMoney(kpiData.current_milestone.capital_end)}
                       </div>
-                    ))}
-                  </div>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                        Pair: {kpiData.planning_symbol} · Window: {kpiData.history_window_label}
+                      </div>
+                      {Number(kpiData.net_external_funding_ngn || 0) !== 0 && (
+                        <div style={{ fontSize: 12, color: '#f59e0b' }}>
+                          Progress balance {formatMoney(kpiData.progress_balance_ngn)} after external funding of {formatMoney(kpiData.net_external_funding_ngn)}.
+                        </div>
+                      )}
+                    </div>
+                  </SurfaceCard>
                 </div>
 
-                {kpi.status === 'DANGER' && (
-                  <div style={{ marginTop: 12, background: '#2a0d0d', border: '1px solid #ef444455', borderRadius: 8, padding: '10px 14px', color: '#ef4444', fontSize: 12 }}>
-                    Daily loss limit reached at {formatMoney(kpi.daily_limit_ngn)}. Stop trading for today.
-                  </div>
-                )}
+                <div style={{ marginTop: 16 }}>
+                  <SurfaceCard
+                    title="Open position alignment"
+                    subtitle="See whether your live positions are respecting today's pace, size, and trade-slot plan."
+                    accent={openAlignment.positions_count > 0 ? openAlignmentStatusColour : '#38bdf8'}
+                    right={openAlignment.positions_count > 0 ? (
+                      <span style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: openAlignmentStatusColour,
+                        background: `${openAlignmentStatusColour}15`,
+                        border: `1px solid ${openAlignmentStatusColour}44`,
+                        borderRadius: 999,
+                        padding: '4px 10px',
+                      }}>
+                        {openAlignment.status}
+                      </span>
+                    ) : null}
+                  >
+                    {openAlignment.positions_count > 0 ? (
+                      <>
+                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+                          <MiniStat label="Open P&L" value={formatMoney(openAlignment.total_open_ngn)} note={`Target ${formatMoney(openAlignment.target_ngn_for_open_positions)}`} colour={openAlignment.total_open_ngn >= 0 ? '#22c55e' : '#ef4444'} />
+                          <MiniStat label={`${openMoveUnitLabel} open`} value={Number(openTotalUnits).toLocaleString(undefined, { maximumFractionDigits: 1 })} note={`Target ${Number(openTargetUnits).toLocaleString(undefined, { maximumFractionDigits: 1 })}`} colour="#38bdf8" />
+                          <MiniStat label="Settings match" value={`${openAlignment.matching_positions_count || 0}/${openAlignment.positions_count || 0}`} note="Lot size and slot rules" colour={openAlignmentStatusColour} />
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {openAlignment.positions.map((position) => (
+                            <div
+                              key={position.ticket}
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                                padding: '10px 12px',
+                                border: '1px solid #1e1e1e',
+                                borderRadius: 8,
+                                background: '#0f1720',
+                              }}
+                            >
+                              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+                                <span style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  color: position.settings_status === 'MATCH' ? '#22c55e' : '#f59e0b',
+                                  background: position.settings_status === 'MATCH' ? '#22c55e15' : '#f59e0b15',
+                                  border: `1px solid ${position.settings_status === 'MATCH' ? '#22c55e44' : '#f59e0b44'}`,
+                                  borderRadius: 999,
+                                  padding: '3px 8px',
+                                }}>
+                                  {position.settings_status}
+                                </span>
+                                <span style={{ fontSize: 12, fontWeight: 700, color: '#f0f0f0' }}>{position.type_label}</span>
+                                <span style={{ fontSize: 12, color: '#999' }}>#{position.ticket}</span>
+                                <span style={{ fontSize: 12, color: '#999' }}>{position.volume} lot</span>
+                                <span style={{ fontSize: 12, color: '#999' }}>
+                                  {formatMoney(position.open_ngn)} / {Number(position.open_units || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} {openAlignment.move_unit_short || 'u'}
+                                </span>
+                              </div>
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: STATUS_COLOURS[position.status] || '#38bdf8' }}>
+                                  {position.pct_of_slot_target}% of trade slot
+                                </div>
+                                <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
+                                  Slot {position.trade_slot_number} target {formatMoney(position.slot_target_ngn)}
+                                </div>
+                                <div style={{ fontSize: 11, color: position.lot_matches_plan ? '#22c55e' : '#f59e0b', marginTop: 2 }}>
+                                  Lot {position.volume} vs KPI {position.recommended_lot}
+                                </div>
+                              </div>
+                              {position.settings_notes?.length > 0 && (
+                                <div style={{ width: '100%', fontSize: 11, color: '#f59e0b' }}>
+                                  {position.settings_notes.join(' | ')}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ color: '#666', fontSize: 12 }}>
+                        No open position is active on the selected pair right now.
+                      </div>
+                    )}
+                  </SurfaceCard>
+                </div>
               </>
             );
           })()}
