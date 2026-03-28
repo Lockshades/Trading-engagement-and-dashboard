@@ -28,30 +28,33 @@ This document tracks the development progress toward production readiness. All f
 | External Cash Flow | Backend, Risk Management | Done | Adjusts progress for deposits/withdrawals |
 | Error Boundary | UX, Infrastructure | Done | Graceful error handling in React |
 
-### In Progress
+### In Progress - TIER 1 (Immediate)
 
 | Feature | Classifications | Status | Notes |
 |---------|-----------------|--------|-------|
-| None currently | | |
+| Executive Arm - Lot Size Cap | Core, Risk Management, Novel | In Progress | Enforce max lot per symbol from daily KPI |
+| Executive Arm - Auto-Close | Core, Risk Management, Novel | In Progress | Auto-close at +10% buffer |
+| Sleep/Gap Protection | Core, Risk Management, Novel | P0 | Prevent account destruction from weekend gaps |
+| Multi-Account Sync | Core, Backend, Novel | P0 | PROP firm multi-account management |
 
-### Backlog
+### Backlog - TIER 2
 
 | Feature | Classifications | Priority | Notes |
 |---------|-----------------|----------|-------|
-| Marginal Analysis | Core, Backend, Novel | P1 | Marginal trade cutoff optimization |
-| AI Intelligence Layer | Novel | P2 | Context-aware advice generation |
-| MT5 Diagnostics | Infrastructure | P2 | Connection reliability monitoring |
-| Persistence/Audit | Backend, Infrastructure | P2 | Trade logging and session history |
-| Data Export | UX | P3 | Export reports to CSV/PDF |
+| Correlation-Aware Sizing | Core, Risk Management, Novel | P1 | Adjust lot by correlation matrix |
+| Drawdown Recovery Sizing | Core, Risk Management | P1 | Reduce lot after drawdown |
+| Session-Specific Risk | Risk Management | P2 | Adjust lot by trading session |
+| Smart Breakeven | UX | P2 | Confirm before moving SL to BE |
 
 ## Progress Summary
 
-- **Total Features**: 8 complete, 5 in backlog
-- **Completion**: 61.5% of identified features implemented
-- **Classification Coverage**: All 6 classifications have at least 1 feature
+- **Total Features**: 8 complete, 8 in progress/backlog
+- **Completion**: 50% of identified features implemented
+- **Tier 1 Priority**: 4 features in active development
 
 ## Next Steps
 
-1. Complete Marginal Analysis (P1)
-2. Add MT5 connection diagnostics (P2)
-3. Begin AI Intelligence research spikes (P2)
+1. Complete Executive Arm Phase 1 (Lot Size Cap + Auto-Close)
+2. Design Sleep/Gap Protection architecture
+3. Design Multi-Account Sync architecture
+4. Push to GitHub
